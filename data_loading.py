@@ -163,11 +163,11 @@ def main():
     # Update the status for changed tables
     logging.info(f"📷 Changed tables: {changed_tables}")
     dbt_path = f"dbt_tracking/{datetime.datetime.now().strftime('%Y%m%d')}_changed_tables.json"
-    # if len(changed_tables):
-    #     changed_data = [{"table_name": table_name, "is_processed": True}
-    #                     for table_name in changed_tables]
-    #     data = json.dumps(changed_data)
-    #     write_to_s3(data, dbt_path)
+    if len(changed_tables):
+        changed_data = [{"table_name": table_name, "is_processed": True}
+                        for table_name in changed_tables]
+        data = json.dumps(changed_data)
+        write_to_s3(data, dbt_path)
 
 
 if __name__ == "__main__":
