@@ -140,7 +140,7 @@ def process_table(table_name: str):
         if not validate_data(transformed, table_name):
             logging.warning(
                 f"🚫 Skipping write: data validation failed for '{table_name}'")
-            return
+            # return
 
          # 👉 Cleaned table key name (remove "_json" suffix if present)
         table_key = table_name[:-
