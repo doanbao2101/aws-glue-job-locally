@@ -1,6 +1,40 @@
+Here is the updated `README.md` including an **Architecture** section with a visual representation of the data pipeline:
+
+---
+
 # 🧪 AWS Glue Job: Local Docker Testing with WSL
 
 This guide walks through how to run AWS Glue jobs locally using Docker on a WSL (Windows Subsystem for Linux) environment. It covers setup steps and how to run Ingestion, Transformation, and Loading (ETL) scripts.
+
+---
+
+## 📊 Architecture Overview
+
+The following architecture represents the end-to-end data pipeline, starting from external REST APIs through AWS Glue and ending at various data warehouses or databases.
+
+```text
+Data Source: REST API (.JSON/ .CSV/ .XML)
+          ↓
+   Lambda / [Glue Job] (Ingest)
+          ↓
+   S3 Bronze (Raw Data Zone) (.PARQUET)
+          ↓
+  Glue Catalog (bronze_db)
+          ↓
+     Glue ETL Job (Transform)
+          ↓
+   S3 Silver (Clean Data Zone) (.PARQUET)
+          ↓
+  Glue Catalog (silver_db)
+          ↓
+      Data warehouse
+   ┌─────────────┬──────────────┬──────────────┐
+   │  Redshift   │     RDS      │   DynamoDB   │
+   │   (OLAP)    │(Transaction) │    (NoSQL)   │
+   └─────────────┴──────────────┴──────────────┘
+```
+
+> ✅ This architecture supports batch ingestion and transformation, and is optimized for analytics, transactional processing, and real-time NoSQL applications.
 
 ---
 
@@ -31,7 +65,7 @@ Set environment paths and AWS profile.
 ```bash
 export PROFILE_NAME="bao-doan"
 export HOME=/mnt/c/Users/doanb/.aws
-export SCRIPT_PATH=/mnt/c/Projects/MGHI/edp-glue-job/semi/src
+export SCRIPT_PATH=/mnt/c/Projects/MGHI/edp-glue-job/semi/
 ```
 
 #### Company Machine
@@ -39,7 +73,7 @@ export SCRIPT_PATH=/mnt/c/Projects/MGHI/edp-glue-job/semi/src
 ```bash
 export PROFILE_NAME="bao-doan"
 export HOME="/mnt/c/Users/BAO DOAN/.aws"
-export SCRIPT_PATH="/mnt/c/Bao_Doan/Task/Task052_MGHI/mghi-glue-job/semi/src"
+export SCRIPT_PATH="/mnt/c/Bao_Doan/Task/Task052_MGHI/mghi-glue-job/semi"
 ```
 
 > 💡 Use double quotes (`"`) for paths with spaces.
@@ -70,7 +104,7 @@ sudo docker run -it --rm \
     --S3_BRONZE_PREFIX rest_api \
     --OUTPUT_FORMAT json \
     --CATEGORY_LIST products,users,carts \
-    --IS_PARTITION true
+    --IS_PARTITION false
 ```
 
 ### 🛠 Transformation Job
@@ -111,3 +145,7 @@ sudo docker run -it --rm \
 * Make sure Docker is running in your WSL environment.
 * Adjust volume mount paths (`HOME` and `SCRIPT_PATH`) if your folder structure differs.
 * Ensure your AWS credentials and permissions are correctly configured for the job profile.
+
+---
+
+Let me know if you'd like a version with a visual diagram (e.g., PNG/PlantUML) or if you want to convert this into a downloadable file!
