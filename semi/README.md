@@ -64,8 +64,8 @@ Set environment paths and AWS profile.
 
 ```bash
 export PROFILE_NAME="bao-doan"
-export HOME=/mnt/c/Users/doanb/.aws
-export SCRIPT_PATH=/mnt/c/Projects/MGHI/edp-glue-job/semi/
+export HOME="/mnt/c/Users/doanb/.aws"
+export SCRIPT_PATH="/mnt/c/Projects/MGHI/edp-glue-job/semi/"
 ```
 
 #### Company Machine
@@ -81,7 +81,7 @@ export SCRIPT_PATH="/mnt/c/Bao_Doan/Task/Task052_MGHI/mghi-glue-job/semi"
 ### 4. Authenticate with AWS
 
 ```bash
-aws configure
+aws configure sso
 aws sso login --profile $PROFILE_NAME
 ```
 
