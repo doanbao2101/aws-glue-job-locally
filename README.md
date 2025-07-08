@@ -1,4 +1,4 @@
-# 📦 Universal Data Glue Job Scripts
+# 📦 Universal Data Glue Job
 
 ## Overview
 
