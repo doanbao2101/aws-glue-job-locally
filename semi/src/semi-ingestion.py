@@ -102,6 +102,22 @@ for category in CATEGORIES:
     except Exception as e:
         print(f"❌ Error processing '{category}': {e}")
 
+try:
+    print(f"📥 Fetching category: infectious")
+    url = "https://cus2rfc1ee.execute-api.ap-southeast-1.amazonaws.com/infectious/national-leprosy?regionId=0100000000&provinceId=0102800000&cityId=0102802000&year=2025"
+    payload = "{\"query\":\"\",\"variables\":{}}"
+    headers = {
+    'Authorization': 'Basic i2wOyfSbkRFStmxtdbR5CwsMj6AHhOYv46VvJkWEt4LPKX8zLdWzxJipTSw6ji7R',
+    'Content-Type': 'application/json'
+    }
+    response = requests.request("GET", url, headers=headers, data=payload)
+    data = response.json()
+    s3_key = construct_s3_key(S3_BRONZE_PREFIX, 'infectious', OUTPUT_FORMAT)
+    upload_to_s3(S3_BRONZE_BUCKET, s3_key, data, OUTPUT_FORMAT)
+    print(f"✅ Uploaded to s3://{S3_BRONZE_BUCKET}/{s3_key}")
+except Exception as e:
+    print(f"❌ Error processing: {e}")
+
 # -------------------------------
 # Finish
 # -------------------------------

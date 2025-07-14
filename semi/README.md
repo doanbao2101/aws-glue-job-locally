@@ -94,13 +94,13 @@ aws sso login --profile $PROFILE_NAME
 ```bash
 sudo docker run -it --rm \
   -v ${HOME}:/home/hadoop/.aws \
-  -v ${SCRIPT_PATH}:/home/hadoop/workspace/ \
+  -v ${SCRIPT_PATH}/src:/home/hadoop/workspace/ \
   -e AWS_PROFILE=$PROFILE_NAME \
   public.ecr.aws/glue/aws-glue-libs:5 \
-  spark-submit /home/hadoop/workspace/ingest.py \
+  spark-submit /home/hadoop/workspace/semi-ingestion.py \
     --JOB_NAME my-local-glue-job \
     --BASE_URL https://fakestoreapi.com/ \
-    --S3_BRONZE_BUCKET project-dev-datalake-semi-data-bucket-us-west-2-154983253388 \
+    --S3_BRONZE_BUCKET mghi-dev-datalake-raw-bucket-us-west-2-154983253388 \
     --S3_BRONZE_PREFIX rest_api \
     --OUTPUT_FORMAT json \
     --CATEGORY_LIST products,users,carts \
@@ -112,14 +112,14 @@ sudo docker run -it --rm \
 ```bash
 sudo docker run -it --rm \
   -v ${HOME}:/home/hadoop/.aws \
-  -v ${SCRIPT_PATH}:/home/hadoop/workspace/ \
+  -v ${SCRIPT_PATH}/src:/home/hadoop/workspace/ \
   -e AWS_PROFILE=$PROFILE_NAME \
   public.ecr.aws/glue/aws-glue-libs:5 \
-  spark-submit /home/hadoop/workspace/transform.py \
+  spark-submit /home/hadoop/workspace/semi-transformation.py \
     --GLUE_DATABASE semi \
     --JOB_NAME my-local-glue-job \
-    --S3_SILVER_BUCKET project-dev-datalake-semi-data-silver-bucket \
-    --S3_SILVER_PREFIX rest_api
+    --S3_SILVER_BUCKET mghi-dev-datalake-stage-bucket-us-west-2-154983253388 \
+    --S3_SILVER_PREFIX **rest_api**
 ```
 
 ### 📥 Loading Job
@@ -127,13 +127,13 @@ sudo docker run -it --rm \
 ```bash
 sudo docker run -it --rm \
   -v ${HOME}:/home/hadoop/.aws \
-  -v ${SCRIPT_PATH}:/home/hadoop/workspace/ \
+  -v ${SCRIPT_PATH}/src:/home/hadoop/workspace/ \
   -e AWS_PROFILE=$PROFILE_NAME \
   public.ecr.aws/glue/aws-glue-libs:5 \
-  spark-submit /home/hadoop/workspace/loading.py \
+  spark-submit /home/hadoop/workspace/semi-loading.py \
     --GLUE_DATABASE semi \
     --JOB_NAME my-local-glue-job \
-    --S3_SILVER_BUCKET project-dev-datalake-semi-data-silver-bucket \
+    --S3_SILVER_BUCKET mghi-dev-datalake-stage-bucket-us-west-2-154983253388 \
     --S3_SILVER_PREFIX rest_api \
     --DATA_DESTINATION redshift
 ```
