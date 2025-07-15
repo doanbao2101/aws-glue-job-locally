@@ -1,93 +1,198 @@
-# 📦 Universal Data Glue Job
+# ⚙️ Run AWS Glue Jobs Locally with Docker + WSL
 
-## Overview
+This guide helps you **run AWS Glue jobs locally** using **Docker** on **WSL (Windows Subsystem for Linux)**. It's useful for developing, testing, and debugging ETL scripts without deploying to AWS every time.
 
-This repository contains AWS Glue job scripts that are essential components of the **Enterprise Data Platform (EDP)** for the MGHI project. These scripts support the **ingestion**, **transformation & validation**, and **loading** of data into an S3-based Data Lake, organized by data type and layer. The architecture is built to handle **structured**, **semi-structured**, and **unstructured** data efficiently.
+---
 
-Key design goals include modularity, scalability, and support for incremental data processing.
+## ✅ Why Run AWS Glue Jobs Locally?
 
-## Features
+Running Glue jobs locally gives you several advantages:
 
-* 🔄 **Incremental Loading**
-  Implements hash-based change detection to process only updated data, improving efficiency and performance.
+- 🧪 **Faster Development Loop**: No need to wait for job deployment on the cloud.
+- 💰 **Cost Savings**: Avoids AWS Glue compute charges during development.
+- 🔧 **Flexible Debugging**: Easily test and debug locally using familiar tools.
+- 🚫 **No Internet Dependency**: Work offline or behind firewalls.
+- 🔍 **Detailed Logging**: Immediate access to local logs for quicker troubleshooting.
 
-* 🧱 **Layered Architecture**
-  Organizes data into **bronze** (raw), **silver** (transformed), and **gold** (curated) layers in Amazon S3.
+---
 
-* 🧩 **Modular Design**
-  Clear separation of logic across ingestion, transformation/validation, and loading.
+## 🏆 Prerequisites
 
-* 🧠 **Multi-Data Type Support**
-  Supports structured (e.g., RDBMS), semi-structured (e.g., JSON, CSV), and unstructured (e.g., logs, images) datasets.
+Make sure you have the following:
 
-## Project Structure
+- ✅ WSL2 with Ubuntu installed
+- ✅ Docker Desktop installed & running
+- ✅ AWS CLI installed and configured with SSO access
+- ✅ Permissions to run Glue jobs
+- ✅ Glue job scripts (`semi-ingestion.py`, `semi-transformation.py`, `semi-loading.py`)
 
+---
+
+## 🗺 Architecture Overview
+
+Below is the ETL pipeline from data ingestion to analytics-ready storage:
+
+```text
+ ┌────────────┐       ┌────────────┐      ┌────────────┐
+ │  REST API  │─────▶│ Glue Ingest│────▶ │  S3 Bronze │
+ └────────────┘       └────────────┘      └────────────┘
+                                              │
+                                              ▼
+                                       Glue Catalog (bronze_db)
+                                              │
+                                              ▼
+                                       Glue Transform Job
+                                              │
+                                              ▼
+                                       S3 Silver (.parquet)
+                                              │
+                                              ▼
+                                       Glue Catalog (silver_db)
+                                              │
+                                              ▼
+                                       Loading Job
+                                              │
+                                              ▼
+    ┌────────────┬──────────────┬──────────────┐
+    │ Redshift   │     RDS      │   DynamoDB   │
+    │  (OLAP)    │ Transactional│   NoSQL DB   │
+    └────────────┴──────────────┴──────────────┘
+````
+
+---
+
+## 🔧 Setup Instructions
+
+### 1. Install WSL and Launch Ubuntu
+
+```bash
+wsl --install
+wsl -d Ubuntu
 ```
-semi/
-    src/
-        ingestion.py         # Ingests semi-structured data from source systems
-        loading.py           # Loads data into S3 bronze/silver/gold layers
-        transformation.py    # Applies transformation and validation rules
 
-structured/
-    src/
-        data_loading.py      # Ingests and loads structured data
-        lambda_function.py   # AWS Lambda function to trigger Glue jobs
+### 2. Pull AWS Glue Docker Image
 
-unstructured/
-    src/
-        # Placeholder for future unstructured data processing scripts
+```bash
+docker pull public.ecr.aws/glue/aws-glue-libs:5
 ```
 
-## Getting Started
+### 3. Set Environment Variables
 
-### Prerequisites
+Update the paths according to your environment:
 
-* Python 3.8+
-* AWS CLI configured with necessary IAM permissions
-* Boto3 library
+#### 💻 Personal Machine
 
-### Installation
+```bash
+export PROFILE_NAME="bao-doan"
+export HOME="/mnt/c/Users/doanb/.aws"
+export SCRIPT_PATH="/mnt/c/Projects/MGHI/edp-glue-job/semi/"
+```
 
-1. Clone the repository:
+#### 🏢 Company Machine
 
-   ```bash
-   git clone https://github.com/your-repo/edp-glue-job.git
-   cd edp-glue-job
-   ```
+```bash
+export PROFILE_NAME="bao-doan"
+export HOME="/mnt/c/Users/BAO DOAN/.aws"
+export SCRIPT_PATH="/mnt/c/Bao_Doan/Task/Task052_MGHI/mghi-glue-job/semi"
+```
 
-2. Install dependencies:
+> 💡 Use quotes if the path contains spaces.
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+### 4. Authenticate via AWS SSO
 
-### Usage
+```bash
+aws configure sso
+aws sso login --profile $PROFILE_NAME
+```
 
-1. Configure your AWS credentials and S3 bucket details in the appropriate configuration file.
+---
 
-2. Run the ingestion script:
+## 🚀 Run Glue Jobs Locally
 
-   ```bash
-   python semi/src/ingestion.py
-   ```
+You can run Glue scripts dynamically by modifying the variables below:
 
-3. Perform data transformation and validation:
+```bash
+# Example variables
+export SCRIPT="semi-ingestion.py"         # semi-transformation.py or semi-loading.py
+export JOB_NAME="my-local-glue-job"
+export EXTRA_ARGS="--BASE_URL https://fakestoreapi.com/ --S3_BRONZE_BUCKET my-bronze-bucket --CATEGORY_LIST products,users"
 
-   ```bash
-   python semi/src/transformation.py
-   ```
+# Run command
+sudo docker run -it --rm \
+  -v ${HOME}:/home/hadoop/.aws \
+  -v ${SCRIPT_PATH}/src:/home/hadoop/workspace/ \
+  -e AWS_PROFILE=$PROFILE_NAME \
+  public.ecr.aws/glue/aws-glue-libs:5 \
+  spark-submit /home/hadoop/workspace/$SCRIPT \
+    --JOB_NAME $JOB_NAME $EXTRA_ARGS
+```
 
-4. Load processed data into S3:
+---
 
-   ```bash
-   python semi/src/loading.py
-   ```
+### 🔄 Ingestion Job (Example)
 
-## Contributing
+```bash
+sudo docker run -it --rm \
+  -v ${HOME}:/home/hadoop/.aws \
+  -v ${SCRIPT_PATH}/src:/home/hadoop/workspace/ \
+  -e AWS_PROFILE=$PROFILE_NAME \
+  public.ecr.aws/glue/aws-glue-libs:5 \
+  spark-submit /home/hadoop/workspace/semi-ingestion.py \
+    --JOB_NAME my-local-glue-job \
+    --BASE_URL https://fakestoreapi.com/ \
+    --S3_BRONZE_BUCKET mghi-dev-datalake-raw-bucket-us-west-2-154983253388 \
+    --S3_BRONZE_PREFIX rest_api \
+    --OUTPUT_FORMAT json \
+    --CATEGORY_LIST products,users,carts \
+    --IS_PARTITION false
+```
 
-Contributions are welcome! Please fork the repository and submit a pull request. Make sure to follow the existing code structure and documentation guidelines.
+### 🛠 Transformation Job (Example)
 
-## License
+```bash
+sudo docker run -it --rm \
+  -v ${HOME}:/home/hadoop/.aws \
+  -v ${SCRIPT_PATH}/src:/home/hadoop/workspace/ \
+  -e AWS_PROFILE=$PROFILE_NAME \
+  public.ecr.aws/glue/aws-glue-libs:5 \
+  spark-submit /home/hadoop/workspace/semi-transformation.py \
+    --GLUE_DATABASE semi \
+    --JOB_NAME my-local-glue-job \
+    --S3_SILVER_BUCKET mghi-dev-datalake-stage-bucket-us-west-2-154983253388 \
+    --S3_SILVER_PREFIX rest_api
+```
 
-This project is licensed under the **MIT License**. See the `LICENSE` file for full details.
+### 📥 Loading Job (Example)
+
+```bash
+sudo docker run -it --rm \
+  -v ${HOME}:/home/hadoop/.aws \
+  -v ${SCRIPT_PATH}/src:/home/hadoop/workspace/ \
+  -e AWS_PROFILE=$PROFILE_NAME \
+  public.ecr.aws/glue/aws-glue-libs:5 \
+  spark-submit /home/hadoop/workspace/semi-loading.py \
+    --GLUE_DATABASE semi \
+    --JOB_NAME my-local-glue-job \
+    --S3_SILVER_BUCKET mghi-dev-datalake-stage-bucket-us-west-2-154983253388 \
+    --S3_SILVER_PREFIX rest_api \
+    --DATA_DESTINATION redshift
+```
+
+---
+
+## 📝 Notes
+
+* 🐳 Ensure Docker is running under WSL integration.
+* 🔄 Adjust paths (`HOME`, `SCRIPT_PATH`) based on your system structure.
+* 🔐 Make sure your AWS profile has Glue and S3 permissions.
+* 🛠 Use logs printed by the container for debugging and iteration.
+
+---
+
+## 📚 References
+
+* [AWS Glue Documentation](https://docs.aws.amazon.com/glue/)
+* [Glue Docker Image – AWS Public ECR](https://gallery.ecr.aws/glue/aws-glue-libs)
+* [WSL Installation Guide – Microsoft](https://learn.microsoft.com/en-us/windows/wsl/)
+
+---
