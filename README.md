@@ -129,6 +129,35 @@ sudo docker run -it --rm \
 
 ---
 
+### 🛠️ Prerequisites:
+
+1. **🗂️ AWS S3 Bucket:** Ensure the bucket `mghi-dev-datalake-raw-bucket-us-west-2-154983253388` exists in the correct region and is ready for data storage.
+2. **⚙️ AWS CLI:** Configure AWS CLI with the correct profile and credentials.
+
+### 🚀 Run the Job:
+
+```bash
+sudo docker run -it --rm \
+  -v ${HOME}:/home/hadoop/.aws \
+  -v ${SCRIPT_PATH}/src:/home/hadoop/workspace/ \
+  -e AWS_PROFILE=$PROFILE_NAME \
+  public.ecr.aws/glue/aws-glue-libs:5 \
+  spark-submit /home/hadoop/workspace/semi-ingestion.py \
+    --JOB_NAME my-local-glue-job \
+    --BASE_URL https://fakestoreapi.com/ \
+    --S3_BRONZE_BUCKET mghi-dev-datalake-raw-bucket-us-west-2-154983253388 \
+    --S3_BRONZE_PREFIX rest_api \
+    --OUTPUT_FORMAT json \
+    --CATEGORY_LIST products,users,carts \
+    --IS_PARTITION false
+```
+
+* **🔑 AWS Profile:** Set the `$PROFILE_NAME` environment variable to your AWS profile.
+* **📦 S3 Bucket:** Verify the correct bucket and permissions.
+* **🌐 Base URL:** Ensure the URL (`https://fakestoreapi.com/`) is correct for your data source.
+
+---
+
 ### 🔄 Ingestion Job (Example)
 
 ```bash
