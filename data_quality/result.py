@@ -472,22 +472,28 @@ def perform_data_quality_check(df, table_name: str, processing_time_seconds: flo
 
 
 def get_table_list(database_name: str) -> List[str]:
-    """Get list of tables from Glue Catalog"""
+    """Get list of tables from Glue Catalog (limit to 10 tables)"""
     try:
         glue_client = boto3.client('glue')
         table_list = []
         paginator = glue_client.get_paginator('get_tables')
+
         for page in paginator.paginate(DatabaseName=database_name):
             for table in page['TableList']:
                 # Filter out null or empty table names
                 if table['Name'] and table['Name'].strip():
                     table_list.append(table['Name'].strip())
-                else:
-                    logging.warning(
-                        f"Skipping table with null or empty name: {table}")
+
+                    # Stop once 10 tables are found
+                    if len(table_list) >= 10:
+                        break
+            if len(table_list) >= 10:
+                break
+
         logging.info(
             f"Found {len(table_list)} valid tables in Glue Catalog: {table_list}")
         return table_list
+
     except Exception as e:
         logging.error(f"Failed to retrieve tables from Glue Catalog: {e}")
         return []
@@ -499,7 +505,9 @@ def get_gold_table_list(jdbc_url: str, db_user: str, db_pass: str, schema: str =
         query = f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{schema}' AND table_type = 'BASE TABLE'"
         df = spark.read.format("jdbc").option("url", jdbc_url).option("user", db_user).option(
             "password", db_pass).option("dbtable", f"({query}) as t").option("driver", "org.postgresql.Driver").load()
-        table_list = [row['table_name'] for row in df.collect()]
+        # table_list = [row['table_name'] for row in df.collect()]
+        # Get the first 10 tables
+        table_list = [row['table_name'] for row in df.collect()][:10]
         logging.info(
             f"Found {len(table_list)} tables in Gold schema '{schema}': {table_list}")
         return table_list
@@ -786,16 +794,14 @@ def main():
                 f"Data quality table creation failed for layer {selected_layer}. Exiting.")
             sys.exit(1)
 
-        # if selected_layer == 'bronze' or selected_layer == 'silver':
-        #     tables = get_table_list(DATABASE_NAME)
-        # elif selected_layer == 'gold':
-        #     tables = get_gold_table_list(JDBC_URL, DB_USERNAME, DB_PASSWORD, rds_schema)
-        # else:
-        #     logging.error(f"Unknown layer: {selected_layer}")
-        #     return
-
-        tables = ['livedb_new_dbo_hrsetstatus', 'livedb_new_dbo_hrsettaxcodes', 'livedb_new_dbo_hrsettaxtable',
-                  'livedb_new_dbo_hrsettrainings', 'livedb_new_dbo_item_extraction_2023', 'livedb_new_dbo_iwadjinv', 'livedb_new_dbo_iwadjitem']
+        if selected_layer == 'bronze' or selected_layer == 'silver':
+            tables = get_table_list(DATABASE_NAME)
+        elif selected_layer == 'gold':
+            tables = get_gold_table_list(
+                JDBC_URL, DB_USERNAME, DB_PASSWORD, rds_schema)
+        else:
+            logging.error(f"Unknown layer: {selected_layer}")
+            return
 
         if not tables:
             logging.error("No tables found for the selected layer. Exiting.")
