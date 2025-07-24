@@ -16,6 +16,7 @@ import time
 from datetime import datetime
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, BooleanType, LongType
 from functools import reduce
+from pyspark.sql import DataFrame
 
 """
 Glue Job: Data Quality Checker from Bronze (S3) to RDS/Postgres
@@ -35,6 +36,8 @@ Glue Job: Data Quality Checker from Bronze (S3) to RDS/Postgres
 #   DB_PASSWORD
 #   DB_NAME
 #   TEMP_S3_DIR
+#   S3_SILVER_BUCKET (for Silver layer)
+#   S3_SILVER_PREFIX (for Silver layer)
 # =====================
 
 # JDBC Connection Configuration
@@ -45,6 +48,86 @@ JDBC_FETCH_SIZE = 1000
 
 # Data Quality Schema Configuration
 DATA_QUALITY_SCHEMA = "data_quality"  # Target schema in RDS PostgreSQL
+
+# Category keywords for table classification
+category_keywords = {
+    'Finance & Accounting': [
+        'finance', 'accounting', 'revenue', 'payment', 'billing', 'invoice',
+        'account', 'ledger', 'transaction', 'txn', 'trans', 'charge', 'fee',
+        'cost', 'expense', 'budget', 'financial', 'money', 'cash', 'credit',
+        'debit', 'balance', 'collection', 'phic', 'insurance', 'fin'
+    ],
+    'Patient Management': [
+        'patient', 'pat', 'pt', 'admission', 'discharge', 'register',
+        'demographic', 'contact', 'address', 'guardian', 'emergency', 'visitor'
+    ],
+    'User & Authentication': [
+        'user', 'login', 'password', 'auth', 'permission', 'role', 'access',
+        'security', 'credential', 'session', 'token'
+    ],
+    'Medical/Clinical': [
+        'medical', 'clinical', 'diagnosis', 'treatment', 'procedure', 'service',
+        'icd', 'cpt', 'doctor', 'physician', 'nurse', 'practitioner', 'specialty'
+    ],
+    'Inventory & Supplies': [
+        'inventory', 'inv', 'stock', 'item', 'supply', 'warehouse', 'storage',
+        'product', 'material', 'equipment', 'asset', 'requisition'
+    ],
+    'Reports & Analytics': [
+        'report', 'analytics', 'summary', 'statistics', 'metric', 'kpi',
+        'dashboard', 'chart', 'graph', 'analysis'
+    ],
+    'System Configuration': [
+        'config', 'setting', 'parameter', 'system', 'admin', 'setup',
+        'preference', 'option', 'application', 'app'
+    ],
+    'Pharmacy': [
+        'pharmacy', 'drug', 'medicine', 'medication', 'prescription', 'dose',
+        'pharma', 'rx', 'pharmaceutical'
+    ],
+    'Human Resources': [
+        'employee', 'emp', 'staff', 'personnel', 'hr', 'payroll', 'department',
+        'position', 'job', 'work', 'schedule', 'shift'
+    ],
+    'Laboratory': [
+        'lab', 'laboratory', 'test', 'specimen', 'sample', 'result',
+        'pathology', 'microbiology', 'chemistry', 'hematology'
+    ],
+    'Radiology': [
+        'radiology', 'imaging', 'xray', 'rad', 'ct', 'mri', 'ultrasound',
+        'scan', 'radiological', 'dicom'
+    ],
+    'Scheduling & Appointments': [
+        'schedule', 'appointment', 'appt', 'booking', 'calendar', 'cal',
+        'slot', 'availability', 'queue', 'waiting'
+    ],
+    'Billing & Insurance': [
+        'bill', 'invoice', 'claim', 'insurance', 'coverage', 'copay',
+        'deductible', 'reimbursement', 'adjudication'
+    ],
+    'Asset Management': [
+        'asset', 'equipment', 'maintenance', 'calibration', 'service',
+        'warranty', 'vendor', 'contract'
+    ],
+    'Audit & Logging': [
+        'audit', 'log', 'history', 'tracking', 'trail', 'event',
+        'activity', 'monitor', 'compliance'
+    ],
+    'Master Data': [
+        'master', 'lookup', 'reference', 'code', 'type', 'category',
+        'classification', 'taxonomy', 'standard'
+    ]
+}
+
+
+def get_table_category(table_name: str) -> str:
+    """Determine the category of a table based on its name using category_keywords."""
+    name = table_name.lower()
+    for category, keywords in category_keywords.items():
+        for kw in keywords:
+            if kw in name:
+                return category
+    return 'Other'
 
 
 def safe_column_name(column_name: str) -> str:
@@ -89,7 +172,10 @@ args = getResolvedOptions(sys.argv, [
     "DB_USERNAME",
     "DB_PASSWORD",
     "DB_NAME",
-    "TEMP_S3_DIR"
+    "TEMP_S3_DIR",
+    # Silver layer params (optional)
+    "S3_SILVER_BUCKET",
+    "S3_SILVER_PREFIX"
 ])
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -137,6 +223,11 @@ for i, arg in enumerate(sys.argv):
 USE_BATCHING = BATCH_SIZE > 0
 MAX_THREADS = 10
 processed_tables = []
+
+# Add Silver and Gold layer config
+S3_SILVER_BUCKET = args.get("S3_SILVER_BUCKET", None)
+S3_SILVER_PREFIX = args.get("S3_SILVER_PREFIX", None)
+GOLD_SCHEMA = 'new_raw_data'  # For Gold layer (RDS schema)
 
 
 def validate_jdbc_connection():
@@ -223,15 +314,21 @@ def ensure_data_quality_schema_exists():
         return False
 
 
-def create_data_quality_table():
-    """Create the data quality results table in RDS PostgreSQL"""
-    try:
-        logging.info(
-            f"Creating data quality results table in schema '{DATA_QUALITY_SCHEMA}'...")
+def get_quality_table_name(layer: str) -> str:
+    """Return the data quality results table name for the given layer."""
+    return f"data_quality_results_{layer}"
 
+
+def create_data_quality_table(layer: str):
+    """Create the data quality results table for the given layer in RDS PostgreSQL"""
+    try:
+        table_name = get_quality_table_name(layer)
+        logging.info(
+            f"Creating data quality results table '{table_name}' in schema '{DATA_QUALITY_SCHEMA}'...")
         # Define the schema for data quality results using StructType
         quality_schema = StructType([
             StructField("table_name", StringType(), True),
+            StructField("category", StringType(), True),
             StructField("ingestion_timestamp", StringType(), True),
             StructField("check_timestamp", StringType(), True),
             StructField("processing_time_seconds", DoubleType(), True),
@@ -248,11 +345,9 @@ def create_data_quality_table():
             StructField("error_message", StringType(), True),
             StructField("total_cell_nulls", LongType(), True)
         ])
-
         # Create empty DataFrame with the schema
         empty_df = spark.createDataFrame([], quality_schema)
         empty_dyf = DynamicFrame.fromDF(empty_df, glueContext, "empty_dyf")
-
         # Create the table
         glueContext.write_dynamic_frame.from_options(
             frame=empty_dyf,
@@ -261,17 +356,15 @@ def create_data_quality_table():
                 "url": JDBC_URL,
                 "user": DB_USERNAME,
                 "password": DB_PASSWORD,
-                "dbtable": f"{DATA_QUALITY_SCHEMA}.data_quality_results",
+                "dbtable": f"{DATA_QUALITY_SCHEMA}.{table_name}",
                 "driver": "org.postgresql.Driver",
                 "batchsize": "1",
-                "preactions": f"DROP TABLE IF EXISTS {DATA_QUALITY_SCHEMA}.data_quality_results;"
+                "preactions": f"DROP TABLE IF EXISTS {DATA_QUALITY_SCHEMA}.{table_name};"
             }
         )
-
         logging.info(
-            f"✅ Data quality results table created: {DATA_QUALITY_SCHEMA}.data_quality_results")
+            f"✅ Data quality results table created: {DATA_QUALITY_SCHEMA}.{table_name}")
         return True
-
     except Exception as e:
         logging.error(f"❌ Failed to create data quality results table: {e}")
         return False
@@ -353,6 +446,7 @@ def perform_data_quality_check(df, table_name: str, processing_time_seconds: flo
 
         quality_metrics = {
             "table_name": table_name,
+            "category": get_table_category(table_name),
             "processing_time_seconds": round(processing_time_seconds, 2),
             "is_empty": is_empty,
             "total_null_record": total_null_record,
@@ -399,6 +493,22 @@ def get_table_list(database_name: str) -> List[str]:
         return []
 
 
+def get_gold_table_list(jdbc_url: str, db_user: str, db_pass: str, schema: str = 'raw_data') -> list:
+    """Get list of tables from RDS/Postgres raw_data schema (Gold layer)"""
+    try:
+        query = f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{schema}' AND table_type = 'BASE TABLE'"
+        df = spark.read.format("jdbc").option("url", jdbc_url).option("user", db_user).option(
+            "password", db_pass).option("dbtable", f"({query}) as t").option("driver", "org.postgresql.Driver").load()
+        table_list = [row['table_name'] for row in df.collect()]
+        logging.info(
+            f"Found {len(table_list)} tables in Gold schema '{schema}': {table_list}")
+        return table_list
+    except Exception as e:
+        logging.error(
+            f"Failed to retrieve tables from Gold schema '{schema}': {e}")
+        return []
+
+
 def get_latest_ingestion_ts(s3_bucket: str, table_name: str) -> str:
     """Get the latest ingestion timestamp for a table from S3"""
     table_name_clean = table_name.replace(TABLE_PREFIX, "")
@@ -417,23 +527,68 @@ def get_latest_ingestion_ts(s3_bucket: str, table_name: str) -> str:
     return None
 
 
-def save_quality_results(quality_metrics: Dict[str, Any], ingestion_ts: str, processing_status: str = "SUCCESS", error_message: str = ""):
-    """Save data quality results to RDS PostgreSQL"""
+def get_quality_schema():
+    return StructType([
+        StructField("table_name", StringType(), True),
+        StructField("category", StringType(), True),
+        StructField("ingestion_timestamp", StringType(), True),
+        StructField("check_timestamp", StringType(), True),
+        StructField("processing_time_seconds", DoubleType(), True),
+        StructField("is_empty", BooleanType(), True),
+        StructField("total_null_record", LongType(), True),
+        StructField("percentage_of_null_values", DoubleType(), True),
+        StructField("total_duplicated_records", LongType(), True),
+        StructField("number_of_records", LongType(), True),
+        StructField("table_size_mb", DoubleType(), True),
+        StructField("completeness_score", DoubleType(), True),
+        StructField("uniqueness_score", DoubleType(), True),
+        StructField("data_score", DoubleType(), True),
+        StructField("processing_status", StringType(), True),
+        StructField("error_message", StringType(), True),
+        StructField("total_cell_nulls", LongType(), True)
+    ])
 
+
+def sanitize_quality_metrics(metrics: dict) -> dict:
+    # Ensure no None values and correct types for all fields
+    return {
+        "table_name": str(metrics.get("table_name", "")),
+        "category": str(metrics.get("category", "")),
+        "ingestion_timestamp": str(metrics.get("ingestion_timestamp", "")),
+        "check_timestamp": str(metrics.get("check_timestamp", "")),
+        "processing_time_seconds": float(metrics.get("processing_time_seconds", 0.0)),
+        "is_empty": bool(metrics.get("is_empty", False)),
+        "total_null_record": int(metrics.get("total_null_record", 0)),
+        "percentage_of_null_values": float(metrics.get("percentage_of_null_values", 0.0)),
+        "total_duplicated_records": int(metrics.get("total_duplicated_records", 0)),
+        "number_of_records": int(metrics.get("number_of_records", 0)),
+        "table_size_mb": float(metrics.get("table_size_mb", 0.0)),
+        "completeness_score": float(metrics.get("completeness_score", 0.0)),
+        "uniqueness_score": float(metrics.get("uniqueness_score", 0.0)),
+        "data_score": float(metrics.get("data_score", 0.0)),
+        "processing_status": str(metrics.get("processing_status", "")),
+        "error_message": str(metrics.get("error_message", "")),
+        "total_cell_nulls": int(metrics.get("total_cell_nulls", 0)),
+    }
+
+
+def save_quality_results_to_s3(quality_metrics: Dict[str, Any], ingestion_ts: str, processing_status: str = "SUCCESS", error_message: str = "", layer: str = None):
+    """Save data quality results to the correct RDS table for the layer (no layer_prefix column)"""
     try:
-
         # Add metadata
         quality_metrics["ingestion_timestamp"] = ingestion_ts
         quality_metrics["check_timestamp"] = datetime.now().strftime(
             "%Y-%m-%d %H:%M:%S")
         quality_metrics["processing_status"] = processing_status
         quality_metrics["error_message"] = error_message
-
-        # Create DataFrame from quality metrics
-        quality_df = spark.createDataFrame([quality_metrics])
+        # Sanitize metrics to ensure no None values and correct types
+        sanitized_metrics = sanitize_quality_metrics(quality_metrics)
+        table_name = get_quality_table_name(layer or "unknown")
+        # Create DataFrame from quality metrics with explicit schema
+        quality_df = spark.createDataFrame(
+            [sanitized_metrics], schema=get_quality_schema())
         quality_dyf = DynamicFrame.fromDF(
             quality_df, glueContext, "quality_dyf")
-
         # Save to RDS
         glueContext.write_dynamic_frame.from_options(
             frame=quality_dyf,
@@ -442,23 +597,21 @@ def save_quality_results(quality_metrics: Dict[str, Any], ingestion_ts: str, pro
                 "url": JDBC_URL,
                 "user": DB_USERNAME,
                 "password": DB_PASSWORD,
-                "dbtable": f"{DATA_QUALITY_SCHEMA}.data_quality_results",
+                "dbtable": f"{DATA_QUALITY_SCHEMA}.{table_name}",
                 "driver": "org.postgresql.Driver",
                 "batchsize": str(JDBC_BATCH_SIZE)
             }
         )
-
         logging.info(
-            f"[{quality_metrics['table_name']}]✅ Quality results saved to RDS")
-
+            f"[{sanitized_metrics['table_name']}]✅ Quality results saved to RDS table {DATA_QUALITY_SCHEMA}.{table_name}")
     except Exception as e:
         logging.error(
             f"[{quality_metrics.get('table_name', 'Unknown')}] ❌ Failed to save quality results: {e}")
 
 
-def save_quality_results_to_s3(quality_metrics: Dict[str, Any], ingestion_ts: str, processing_status: str = "SUCCESS", error_message: str = "", s3_output_path: str = None):
+def save_quality_results_to_s3(quality_metrics: Dict[str, Any], ingestion_ts: str, processing_status: str = "SUCCESS", error_message: str = "", s3_output_path: str = None, layer: str = None):
     """Save data quality results to S3 in Parquet format"""
-    s3_output_path = "s3://mghi-dev-data-quality-bucket-us-west-2-154983253388/data_quality_results"
+
     try:
         # Add metadata
         quality_metrics["ingestion_timestamp"] = ingestion_ts
@@ -466,11 +619,13 @@ def save_quality_results_to_s3(quality_metrics: Dict[str, Any], ingestion_ts: st
             "%Y-%m-%d %H:%M:%S")
         quality_metrics["processing_status"] = processing_status
         quality_metrics["error_message"] = error_message
-
-        # Create DataFrame from quality metrics
-        quality_df = spark.createDataFrame([quality_metrics])
-        # quality_dyf = DynamicFrame.fromDF(
-        #     quality_df, glueContext, "quality_dyf")
+        # Sanitize metrics to ensure no None values and correct types
+        sanitized_metrics = sanitize_quality_metrics(quality_metrics)
+        table_name = get_quality_table_name(layer or "unknown")
+        # Create DataFrame from quality metrics with explicit schema
+        quality_df = spark.createDataFrame(
+            [sanitized_metrics], schema=get_quality_schema())
+        s3_output_path = f"s3://mghi-dev-data-quality-bucket-us-west-2-154983253388/{table_name}"
 
         # Save to S3 in Parquet format if the S3 output path is provided
         if s3_output_path:
@@ -483,8 +638,30 @@ def save_quality_results_to_s3(quality_metrics: Dict[str, Any], ingestion_ts: st
             f"[{quality_metrics.get('table_name', 'Unknown')}] ❌ Failed to save quality results: {e}")
 
 
-def process_table_quality(table_name: str, ingestion_ts: str):
-    """Process data quality checks for a single table"""
+def read_table_data(table_name: str, layer: str, ingestion_ts: str = None, rds_schema: str = None) -> DataFrame:
+    """Read table data from the specified layer (bronze, silver, gold)"""
+    if layer == 'bronze':
+        s3_path = f"s3://{S3_BRONZE_BUCKET}/{S3_BRONZE_PREFIX}/{table_name}/ingestion_ts={ingestion_ts}/" if ingestion_ts else f"s3://{S3_BRONZE_BUCKET}/{S3_BRONZE_PREFIX}/{table_name}/"
+        logging.info(f"[BRONZE] Reading data from {s3_path}")
+        return spark.read.parquet(s3_path)
+    elif layer == 'silver':
+        if not S3_SILVER_BUCKET or not S3_SILVER_PREFIX:
+            raise ValueError(
+                "S3_SILVER_BUCKET and S3_SILVER_PREFIX must be set for Silver layer.")
+        s3_path = f"s3://{S3_SILVER_BUCKET}/{S3_SILVER_PREFIX}/{table_name}/ingestion_ts={ingestion_ts}/" if ingestion_ts else f"s3://{S3_SILVER_BUCKET}/{S3_SILVER_PREFIX}/{table_name}/"
+        logging.info(f"[SILVER] Reading data from {s3_path}")
+        return spark.read.parquet(s3_path)
+    elif layer == 'gold':
+        # Read from RDS/Postgres raw_data schema
+        dbtable = f'{rds_schema}."{table_name}"'
+        logging.info(f"[GOLD] Reading data from RDS table {dbtable}")
+        return spark.read.format("jdbc").option("url", JDBC_URL).option("user", DB_USERNAME).option("password", DB_PASSWORD).option("dbtable", dbtable).option("driver", "org.postgresql.Driver").load()
+    else:
+        raise ValueError(f"Unknown layer: {layer}")
+
+
+def process_table_quality(table_name: str, ingestion_ts: str, layer: str, rds_schema: str):
+    """Process data quality checks for a single table and layer"""
     max_retries = 3
     retry_count = 0
 
@@ -492,16 +669,15 @@ def process_table_quality(table_name: str, ingestion_ts: str):
         try:
             start_time = time.time()
             table_name_clean = table_name.replace(TABLE_PREFIX, "")
-            s3_path = f"{S3_BRONZE_PATH}/{table_name_clean}/ingestion_ts={ingestion_ts}/"
 
-            logging.info(f"[{table_name}]→ Reading data from {s3_path}")
-            bronze_df = spark.read.parquet(s3_path)
-            row_count = bronze_df.count()
+            df = read_table_data(table_name_clean, layer,
+                                 ingestion_ts, rds_schema)
+            row_count = df.count()
             logging.info(
-                f"[{table_name}]→ Read {row_count} rows from {s3_path}")
+                f"[{table_name}]→ Read {row_count} rows from {layer} layer")
 
             # Log column information for debugging
-            log_column_info(table_name, bronze_df.columns)
+            log_column_info(table_name, df.columns)
 
             if row_count == 0:
                 logging.warning(
@@ -510,6 +686,7 @@ def process_table_quality(table_name: str, ingestion_ts: str):
                 # Save empty quality results
                 empty_metrics = {
                     "table_name": table_name_clean,
+                    "category": get_table_category(table_name_clean),
                     "processing_time_seconds": 0.0,
                     "is_empty": True,
                     "total_null_record": 0,
@@ -522,19 +699,19 @@ def process_table_quality(table_name: str, ingestion_ts: str):
                     "data_score": 100.0,
                     "total_cell_nulls": 0
                 }
-
                 save_quality_results_to_s3(
-                    empty_metrics, ingestion_ts, "EMPTY_TABLE", "No data found in BRONZE layer")
+                    empty_metrics, ingestion_ts, "EMPTY_TABLE", "No data found in layer", layer)
                 processed_tables.append(table_name)
                 break
 
             # Perform data quality checks
             processing_time = time.time() - start_time
             quality_metrics = perform_data_quality_check(
-                bronze_df, table_name_clean, processing_time)
+                df, table_name_clean, processing_time)
 
             # Save quality results to RDS
-            save_quality_results_to_s3(quality_metrics, ingestion_ts)
+            save_quality_results_to_s3(
+                quality_metrics, ingestion_ts, "SUCCESS", "", layer)
 
             processed_tables.append(table_name)
             logging.info(
@@ -556,6 +733,7 @@ def process_table_quality(table_name: str, ingestion_ts: str):
                 # Save error results
                 error_metrics = {
                     "table_name": table_name.replace(TABLE_PREFIX, ""),
+                    "category": get_table_category(table_name.replace(TABLE_PREFIX, "")),
                     "processing_time_seconds": round(processing_time, 2),
                     "is_empty": False,
                     "total_null_record": 0,
@@ -569,7 +747,7 @@ def process_table_quality(table_name: str, ingestion_ts: str):
                     "total_cell_nulls": 0
                 }
                 save_quality_results_to_s3(
-                    error_metrics, ingestion_ts, "ERROR", str(e))
+                    error_metrics, ingestion_ts, "ERROR", str(e), layer)
                 processed_tables.append(table_name)
 
 
@@ -578,7 +756,13 @@ def main():
         description='Perform data quality checks on tables from S3 BRONZE layer and save results to RDS Postgres')
     parser.add_argument('--ingestion-timestamp', required=False,
                         help='Ingestion timestamp to process (format: YYYY-MM-DD_HH-MM-SS). If not provided, use latest available for each table.')
+    parser.add_argument('--layer', required=False, default='bronze', choices=[
+                        'bronze', 'silver', 'gold', 'all'], help='Data layer to process: bronze (default), silver, gold, or all')
+    parser.add_argument('--rds-schema', required=False, default='raw_data',
+                        help='RDS schema to use for gold layer (default: raw_data)')
     args_cli, unknown = parser.parse_known_args()
+    layer = args_cli.layer
+    rds_schema = args_cli.rds_schema
 
     # Validate JDBC connection first
     if not validate_jdbc_connection():
@@ -590,121 +774,135 @@ def main():
     #     logging.error("Data quality schema creation failed. Exiting.")
     #     sys.exit(1)
 
-    # Create data quality results table
-    if not create_data_quality_table():
-        logging.error("Data quality table creation failed. Exiting.")
-        sys.exit(1)
-
     logging.info(f"Getting tables from Glue Catalog: {DATABASE_NAME}")
     logging.info(f"Using JDBC URL: {JDBC_URL}")
     logging.info(f"Target database: {DB_NAME}")
     logging.info(f"Data quality schema: {DATA_QUALITY_SCHEMA}")
 
-    # tables = get_table_list(DATABASE_NAME)
-    tables = ['livedb_new_dbo_hrsetstatus', 'livedb_new_dbo_hrsettaxcodes', 'livedb_new_dbo_hrsettaxtable',
-              'livedb_new_dbo_hrsettrainings', 'livedb_new_dbo_item_extraction_2023', 'livedb_new_dbo_iwadjinv', 'livedb_new_dbo_iwadjitem']
-    logging.info(f"List table: {tables}")
+    def process_layer(selected_layer, rds_schema):
+        # Create the data quality results table for this layer
+        if not create_data_quality_table(selected_layer):
+            logging.error(
+                f"Data quality table creation failed for layer {selected_layer}. Exiting.")
+            sys.exit(1)
 
-    if not tables:
-        logging.error("No tables found in Glue Catalog. Exiting.")
-        return
+        # if selected_layer == 'bronze' or selected_layer == 'silver':
+        #     tables = get_table_list(DATABASE_NAME)
+        # elif selected_layer == 'gold':
+        #     tables = get_gold_table_list(JDBC_URL, DB_USERNAME, DB_PASSWORD, rds_schema)
+        # else:
+        #     logging.error(f"Unknown layer: {selected_layer}")
+        #     return
 
-    # Filter out null or empty table names
-    valid_tables = [table for table in tables if table and table.strip()]
-    if len(valid_tables) != len(tables):
-        logging.warning(
-            f"Filtered out {len(tables) - len(valid_tables)} invalid table names")
+        tables = ['livedb_new_dbo_hrsetstatus', 'livedb_new_dbo_hrsettaxcodes', 'livedb_new_dbo_hrsettaxtable',
+                  'livedb_new_dbo_hrsettrainings', 'livedb_new_dbo_item_extraction_2023', 'livedb_new_dbo_iwadjinv', 'livedb_new_dbo_iwadjitem']
 
-    logging.info(f"Found {len(valid_tables)} valid tables: {valid_tables}")
-
-    if USE_BATCHING:
-        start_idx = BATCH_NUMBER * BATCH_SIZE
-        end_idx = start_idx + BATCH_SIZE
-        batch_tables = valid_tables[start_idx:end_idx]
-        logging.info(
-            f"BATCH MODE: Processing batch {BATCH_NUMBER}: tables {start_idx} to {end_idx-1} (total: {len(batch_tables)} tables)")
-        logging.info(f"Batch tables: {batch_tables}")
-        if not batch_tables:
-            logging.warning(f"No tables in batch {BATCH_NUMBER}")
+        if not tables:
+            logging.error("No tables found for the selected layer. Exiting.")
             return
-        tables_to_process = batch_tables
-    else:
-        logging.info(f"NORMAL MODE: Processing all {len(valid_tables)} tables")
-        tables_to_process = valid_tables
-
-    table_ingestion_map = {}
-    tables_without_data = []
-
-    for table in tables_to_process:
-        table_name_clean = table.replace(TABLE_PREFIX, "")
-        if args_cli.ingestion_timestamp:
-            partition_prefix = f"{S3_BRONZE_PREFIX}/{table_name_clean}/ingestion_ts={args_cli.ingestion_timestamp}/"
-            response = S3_CLIENT.list_objects_v2(
-                Bucket=S3_BRONZE_BUCKET, Prefix=partition_prefix, MaxKeys=1)
-            if 'Contents' in response and response['Contents']:
-                table_ingestion_map[table_name_clean] = args_cli.ingestion_timestamp
-            else:
-                if CREATE_EMPTY_TABLES:
-                    logging.info(
-                        f"Table {table_name_clean} does not have data for ingestion_ts={args_cli.ingestion_timestamp}, will create empty quality record.")
-                    tables_without_data.append(table)
-                else:
-                    logging.warning(
-                        f"Table {table_name_clean} does not have data for ingestion_ts={args_cli.ingestion_timestamp}, skipping.")
+        valid_tables = [table for table in tables if table and table.strip()]
+        if len(valid_tables) != len(tables):
+            logging.warning(
+                f"Filtered out {len(tables) - len(valid_tables)} invalid table names")
+        logging.info(f"Found {len(valid_tables)} valid tables: {valid_tables}")
+        if USE_BATCHING:
+            start_idx = BATCH_NUMBER * BATCH_SIZE
+            end_idx = start_idx + BATCH_SIZE
+            batch_tables = valid_tables[start_idx:end_idx]
+            logging.info(
+                f"BATCH MODE: Processing batch {BATCH_NUMBER}: tables {start_idx} to {end_idx-1} (total: {len(batch_tables)} tables)")
+            logging.info(f"Batch tables: {batch_tables}")
+            if not batch_tables:
+                logging.warning(f"No tables in batch {BATCH_NUMBER}")
+                return
+            tables_to_process = batch_tables
         else:
-            latest_ts = get_latest_ingestion_ts(
-                S3_BRONZE_BUCKET, table_name_clean)
-            if latest_ts:
-                table_ingestion_map[table_name_clean] = latest_ts
-            else:
-                if CREATE_EMPTY_TABLES:
-                    logging.info(
-                        f"Table {table_name_clean} has no ingestion_ts partitions in BRONZE, will create empty quality record.")
-                    tables_without_data.append(table)
-                else:
-                    logging.warning(
-                        f"Table {table_name_clean} has no ingestion_ts partitions in BRONZE, skipping.")
-
-    # Process tables with data
-    if table_ingestion_map:
-        logging.info(f"Tables with data to process: {table_ingestion_map}")
-        with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-            executor.map(lambda t: process_table_quality(
-                t[0], t[1]), table_ingestion_map.items())
-
-    # Create empty quality records for tables without data
-    if tables_without_data:
-        logging.info(
-            f"Creating empty quality records for: {tables_without_data}")
-        for table in tables_without_data:
+            logging.info(
+                f"NORMAL MODE: Processing all {len(valid_tables)} tables")
+            tables_to_process = valid_tables
+        table_ingestion_map = {}
+        tables_without_data = []
+        for table in tables_to_process:
             table_name_clean = table.replace(TABLE_PREFIX, "")
-            empty_metrics = {
-                "table_name": table_name_clean,
-                "processing_time_seconds": 0.0,
-                "is_empty": True,
-                "total_null_record": 0,
-                "percentage_of_null_values": 0.0,
-                "total_duplicated_records": 0,
-                "number_of_records": 0,
-                "table_size_mb": 0.0,
-                "completeness_score": 1.0,
-                "uniqueness_score": 1.0,
-                "data_score": 100.0,
-                "total_cell_nulls": 0
-            }
-            save_quality_results_to_s3(empty_metrics, "N/A",
-                                       "NO_DATA", "No data found in BRONZE layer")
-            processed_tables.append(table)
+            if selected_layer == 'bronze':
+                bucket = S3_BRONZE_BUCKET
+                if args_cli.ingestion_timestamp:
+                    partition_prefix = f"{S3_BRONZE_PREFIX}/{table_name_clean}/ingestion_ts={args_cli.ingestion_timestamp}/"
+                    response = S3_CLIENT.list_objects_v2(
+                        Bucket=bucket, Prefix=partition_prefix, MaxKeys=1)
+                    if 'Contents' in response and response['Contents']:
+                        table_ingestion_map[table_name_clean] = args_cli.ingestion_timestamp
+                    else:
+                        if CREATE_EMPTY_TABLES:
+                            logging.info(
+                                f"Table {table_name_clean} does not have data for ingestion_ts={args_cli.ingestion_timestamp}, will create empty quality record.")
+                            tables_without_data.append(table)
+                        else:
+                            logging.warning(
+                                f"Table {table_name_clean} does not have data for ingestion_ts={args_cli.ingestion_timestamp}, skipping.")
+                else:
+                    latest_ts = get_latest_ingestion_ts(
+                        bucket, table_name_clean)
+                    if latest_ts:
+                        table_ingestion_map[table_name_clean] = latest_ts
+                    else:
+                        if CREATE_EMPTY_TABLES:
+                            logging.info(
+                                f"Table {table_name_clean} has no ingestion_ts partitions in BRONZE, will create empty quality record.")
+                            tables_without_data.append(table)
+                        else:
+                            logging.warning(
+                                f"Table {table_name_clean} has no ingestion_ts partitions in BRONZE, skipping.")
+            elif selected_layer == 'silver':
+                # Silver is not partitioned by ingestion_ts; always add the table
+                table_ingestion_map[table_name_clean] = None
+            elif selected_layer == 'gold':
+                # For gold, ingestion_ts is not used; just process the table
+                table_ingestion_map[table_name_clean] = None
 
-    if not table_ingestion_map and not tables_without_data:
-        logging.error("No tables to process. Exiting.")
-        return
+        # Process tables with data
+        if table_ingestion_map:
+            logging.info(f"Tables with data to process: {table_ingestion_map}")
+            with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+                executor.map(lambda t: process_table_quality(
+                    t[0], t[1], selected_layer if selected_layer != 'gold' else 'gold', rds_schema), table_ingestion_map.items())
+        # Create empty quality records for tables without data
+        if tables_without_data:
+            logging.info(
+                f"Creating empty quality records for: {tables_without_data}")
+            for table in tables_without_data:
+                table_name_clean = table.replace(TABLE_PREFIX, "")
+                empty_metrics = {
+                    "table_name": table_name_clean,
+                    "category": get_table_category(table_name_clean),
+                    "processing_time_seconds": 0.0,
+                    "is_empty": True,
+                    "total_null_record": 0,
+                    "percentage_of_null_values": 0.0,
+                    "total_duplicated_records": 0,
+                    "number_of_records": 0,
+                    "table_size_mb": 0.0,
+                    "completeness_score": 1.0,
+                    "uniqueness_score": 1.0,
+                    "data_score": 100.0,
+                    "total_cell_nulls": 0
+                }
+                save_quality_results_to_s3(
+                    empty_metrics, "N/A", "NO_DATA", f"No data found in {selected_layer.upper()} layer", selected_layer)
+                processed_tables.append(table)
+        if not table_ingestion_map and not tables_without_data:
+            logging.error("No tables to process. Exiting.")
+            return
+    # If layer is 'all', loop through all layers
+    if layer == 'all':
+        for lyr in ['bronze', 'silver', 'gold']:
+            logging.info(f"\n===== Processing {lyr.upper()} Layer =====")
+            process_layer(lyr, rds_schema)
+    else:
+        process_layer(layer, rds_schema)
 
     logging.info("✅ All data quality checks completed successfully!")
-    logging.info(f"📊 Tables with data processed: {len(table_ingestion_map)}")
-    if CREATE_EMPTY_TABLES and tables_without_data:
-        logging.info(
-            f"📊 Empty quality records created: {len(tables_without_data)}")
+    logging.info(f"📊 Tables with data processed: {len(processed_tables)}")
     logging.info(f"📊 Total processed tables: {processed_tables}")
 
     # Print summary
@@ -712,12 +910,8 @@ def main():
     logging.info("🎉 DATA QUALITY JOB SUMMARY")
     logging.info("=" * 80)
     logging.info(f"📊 Total tables processed: {len(processed_tables)}")
-    logging.info(f"✅ Tables with data: {len(table_ingestion_map)}")
-    if CREATE_EMPTY_TABLES:
-        logging.info(
-            f"📭 Empty quality records created: {len(tables_without_data)}")
-    else:
-        logging.info(f"⏭️  Empty tables skipped: {len(tables_without_data)}")
+    # This line was changed to reflect the total processed tables
+    logging.info(f"✅ Tables with data: {len(processed_tables)}")
     logging.info(f"🔗 JDBC URL: {JDBC_URL}")
     logging.info(f"🗄️  Target Database: {DB_NAME}")
     logging.info(f"📋 Data Quality Schema: {DATA_QUALITY_SCHEMA}")
