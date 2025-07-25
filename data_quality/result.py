@@ -485,9 +485,9 @@ def get_table_list(database_name: str) -> List[str]:
                     table_list.append(table['Name'].strip())
 
                     # Stop once 10 tables are found
-                    if len(table_list) >= 10:
+                    if len(table_list) >= 2:
                         break
-            if len(table_list) >= 10:
+            if len(table_list) >= 2:
                 break
 
         logging.info(
@@ -507,7 +507,7 @@ def get_gold_table_list(jdbc_url: str, db_user: str, db_pass: str, schema: str =
             "password", db_pass).option("dbtable", f"({query}) as t").option("driver", "org.postgresql.Driver").load()
         # table_list = [row['table_name'] for row in df.collect()]
         # Get the first 10 tables
-        table_list = [row['table_name'] for row in df.collect()][:10]
+        table_list = [row['table_name'] for row in df.collect()][:2]
         logging.info(
             f"Found {len(table_list)} tables in Gold schema '{schema}': {table_list}")
         return table_list
@@ -580,7 +580,7 @@ def sanitize_quality_metrics(metrics: dict) -> dict:
     }
 
 
-def save_quality_results_to_s3(quality_metrics: Dict[str, Any], ingestion_ts: str, processing_status: str = "SUCCESS", error_message: str = "", layer: str = None):
+def save_quality_results(quality_metrics: Dict[str, Any], ingestion_ts: str, processing_status: str = "SUCCESS", error_message: str = "", layer: str = None):
     """Save data quality results to the correct RDS table for the layer (no layer_prefix column)"""
     try:
         # Add metadata
@@ -617,7 +617,7 @@ def save_quality_results_to_s3(quality_metrics: Dict[str, Any], ingestion_ts: st
             f"[{quality_metrics.get('table_name', 'Unknown')}] ❌ Failed to save quality results: {e}")
 
 
-def save_quality_results_to_s3(quality_metrics: Dict[str, Any], ingestion_ts: str, processing_status: str = "SUCCESS", error_message: str = "", s3_output_path: str = None, layer: str = None):
+def save_quality_results_to_s3(quality_metrics: Dict[str, Any], ingestion_ts: str, processing_status: str = "SUCCESS", error_message: str = "", layer: str = None):
     """Save data quality results to S3 in Parquet format"""
 
     try:
@@ -789,10 +789,10 @@ def main():
 
     def process_layer(selected_layer, rds_schema):
         # Create the data quality results table for this layer
-        if not create_data_quality_table(selected_layer):
-            logging.error(
-                f"Data quality table creation failed for layer {selected_layer}. Exiting.")
-            sys.exit(1)
+        # if not create_data_quality_table(selected_layer):
+        #     logging.error(
+        #         f"Data quality table creation failed for layer {selected_layer}. Exiting.")
+        #     sys.exit(1)
 
         if selected_layer == 'bronze' or selected_layer == 'silver':
             tables = get_table_list(DATABASE_NAME)
