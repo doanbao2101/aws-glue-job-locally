@@ -5,6 +5,12 @@ from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import sha2, concat_ws, lit
+
+
+def _to_bool(x: str) -> bool:
+    return str(x).strip().lower() in {"1", "true", "t", "yes", "y"}
+
 
 # ----------------------------
 # Parse required job arguments
@@ -18,6 +24,7 @@ args = getResolvedOptions(
         "db_password",
         "source_schema",
         "target_schema",
+        "is_upsert"
     ]
 )
 
@@ -30,6 +37,8 @@ target_schema = args["target_schema"]
 
 include_tables = set()
 exclude_tables = set()
+is_upsert = _to_bool(args["is_upsert"])
+HASH_COL = "hash_value"  # đổi nếu cần
 
 # ----------------------------
 # Glue/Spark
@@ -56,6 +65,8 @@ ICON_DONE = "🏁"
 # ----------------------------
 # Helpers
 # ----------------------------
+
+# NEW: parse bool (chấp nhận: true/false/1/0/yes/no)
 
 
 def jdbc_read_query(query_sql: str):
@@ -100,6 +111,11 @@ def get_target_columns(table_name: str):
 def count_rows(schema_name: str, table_name: str) -> int:
     sql = f'SELECT count(*) AS c FROM "{schema_name}"."{table_name}"'
     return int(jdbc_read_query(sql).collect()[0]["c"])
+
+
+def with_row_hash(df):
+    df = df.withColumn(HASH_COL, sha2(concat_ws("||", *df.columns), 256))
+    return df
 
 
 # ----------------------------
@@ -163,7 +179,7 @@ for table_name in candidate_tables:
         src_df = (
             spark.read.format("jdbc")
             .option("url", jdbc_url)
-            .option("dbtable", f'(SELECT * FROM "{source_schema}"."{table_name}" LIMIT 1000) AS src')
+            .option("dbtable", f'(SELECT * FROM "{source_schema}"."{table_name}") AS src')
             .option("user", db_user)
             .option("password", db_password)
             .option("driver", "org.postgresql.Driver")
@@ -177,32 +193,95 @@ for table_name in candidate_tables:
             skipped += 1
             continue
 
-        log.info(
-            f"{ICON_PROC} Appending {n_src} rows → {target_schema}.{table_name}")
-        src_df.write.format("jdbc") \
-            .mode("append") \
-            .option("url", jdbc_url) \
-            .option("dbtable", f'"{target_schema}"."{table_name}"') \
-            .option("user", db_user) \
-            .option("password", db_password) \
-            .option("driver", "org.postgresql.Driver") \
-            .option("batchsize", "5000") \
-            .save()
+        if is_upsert:
+            # # Yêu cầu phải có cột hash
+            # if HASH_COL not in overlap_cols:
+            #     log.warning(
+            #         f"{ICON_WARN} {table_name}: thiếu cột {HASH_COL} → skip upsert")
+            #     skipped += 1
+            #     continue
 
-        # Count target AFTER
-        try:
-            tgt_after = count_rows(target_schema, table_name)
-        except Exception:
-            tgt_after = None
-            log.warning(
-                f"{ICON_WARN} Could not count AFTER for {target_schema}.{table_name}")
+            # Đếm BEFORE (để log)
+            try:
+                tgt_before = count_rows(target_schema, table_name)
+            except Exception:
+                tgt_before = 0
+                log.warning(
+                    f"{ICON_WARN} Could not count BEFORE for {target_schema}.{table_name} (treat as 0)")
 
-        delta = (tgt_after - tgt_before) if (tgt_after is not None) else n_src
-        total_appended += delta
-        processed += 1
+            # Đọc FULL nguồn & đích (không LIMIT) với thứ tự cột theo target
+            src_df = with_row_hash(src_df)  # ADDED
 
-        log.info(f"{ICON_SUCCESS} DONE {table_name} | target_before={tgt_before:,} | appended={delta:,} | target_after={(tgt_after if tgt_after is not None else 'N/A')}")
+            tgt_df = (
+                spark.read.format("jdbc")
+                .option("url", jdbc_url)
+                .option("dbtable", f'"{target_schema}"."{table_name}"')
+                .option("user", db_user)
+                .option("password", db_password)
+                .option("driver", "org.postgresql.Driver")
+                .load()
+                .select(*overlap_cols)
+            )
+            tgt_df = with_row_hash(tgt_df)  # ADDED
 
+            # Tính insert / delete theo HASH_COL (giống kỹ thuật S3 trước đây)
+            insert_data = src_df.join(tgt_df.select(
+                HASH_COL), on=HASH_COL, how="left_anti")
+            delete_data = tgt_df.join(src_df.select(
+                HASH_COL), on=HASH_COL, how="left_anti")
+
+            log.info(
+                f"{ICON_PROC} {table_name} | insert={insert_data.count():,} | delete={delete_data.count():,}")
+
+            # Kết quả cuối cùng thực chất = snapshot latest (src_df) đã dedup theo HASH_COL
+            updated_df = src_df.select(*overlap_cols)
+
+            log.info(f"{ICON_PROC} Overwrite → {target_schema}.{table_name}")
+            (
+                updated_df.write.format("jdbc")
+                .mode("overwrite")
+                .option("url", jdbc_url)
+                .option("dbtable", f'"{target_schema}"."{table_name}"')
+                .option("user", db_user)
+                .option("password", db_password)
+                .option("driver", "org.postgresql.Driver")
+                # cố gắng TRUNCATE thay vì DROP/CREATE để an toàn quyền hạn
+                .option("truncate", "true")
+                .save()
+            )
+
+            # Count AFTER & log
+            try:
+                tgt_after = count_rows(target_schema, table_name)
+            except Exception:
+                tgt_after = None
+                log.warning(
+                    f"{ICON_WARN} Could not count AFTER for {target_schema}.{table_name}")
+
+            delta = (
+                tgt_after - tgt_before) if (tgt_after is not None) else updated_df.count()
+            total_appended += max(0, delta)
+            processed += 1
+
+            log.info(
+                f"{ICON_SUCCESS} UPSERT DONE {table_name} | "
+                f"target_before={tgt_before:,} | target_after={(tgt_after if tgt_after is not None else 'N/A')} | "
+                f"insert={insert_data.count():,} | delete={delete_data.count():,}"
+            )
+
+        else:
+
+            log.info(
+                f"{ICON_PROC} Appending {n_src} rows → {target_schema}.{table_name}")
+            src_df.write.format("jdbc") \
+                .mode("append") \
+                .option("url", jdbc_url) \
+                .option("dbtable", f'"{target_schema}"."{table_name}"') \
+                .option("user", db_user) \
+                .option("password", db_password) \
+                .option("driver", "org.postgresql.Driver") \
+                .option("batchsize", "5000") \
+                .save()
     except Exception as e:
         failed += 1
         log.exception(f"{ICON_ERROR} FAILED {table_name} | {e}")

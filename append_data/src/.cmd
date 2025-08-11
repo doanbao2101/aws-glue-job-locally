@@ -23,6 +23,7 @@ docker run -it --rm \
       --db_password "" \
       --source_schema "s_marts" \
       --target_schema "d_marts" \
-      --batchsize 5000
+      --batchsize 5000 \
+      --is_upsert "true" 
     
 @REM For running on Cloud:  --jdbc_url "jdbc:postgresql://vizdatastack-mghivizdatardsstackmghirdsinstancecf5-kdnaz0gsb9lk.cv4k4ecqw2f3.us-west-2.rds.amazonaws.com:5432/mghi_db" \
