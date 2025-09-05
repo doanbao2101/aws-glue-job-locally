@@ -45,12 +45,41 @@ docker pull public.ecr.aws/glue/aws-glue-libs:5
 
 > 💡 Use quotes if the path contains spaces.
 
-### 3. Authenticate via AWS SSO
+### 3.1 Authenticate via (AWS SSO)
 
 ```bash
 aws configure sso
 aws sso login --profile replace_your_profile_name
 ```
+---
+
+### 3.2 Authenticate via IAM User
+
+If you are using an **IAM user** (with `aws_access_key_id` and `aws_secret_access_key`), configure your credentials locally.
+
+Run the following command inside **WSL** or **PowerShell**:
+
+```bash
+aws configure --profile bao-doan
+```
+
+You will be prompted to enter:
+
+- AWS Access Key ID
+
+- AWS Secret Access Key
+
+- Default region name
+
+- Default output format
+
+This will create (or update) the files:
+
+- ~/.aws/credentials
+
+- ~/.aws/config
+
+
 ---
 
 ## 📝 Notes
