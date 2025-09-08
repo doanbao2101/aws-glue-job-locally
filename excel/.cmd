@@ -21,5 +21,6 @@ sudo docker run -it --rm \
     --JOB_NAME my-local-job \
     --BRONZE_BUCKET "lanhm-dev-datalake-raw-bucket-us-west-2-032397978411/galaxy/" \
     --SILVER_BUCKET "lanhm-dev-datalake-stage-bucket-us-west-2-032397978411/" \
-    --FILES "final-fiscal-sales.xlsx"
+    --FILES "final-membership.xlsx"
+    
 
