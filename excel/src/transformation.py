@@ -69,7 +69,27 @@ FIELD_MAPPING = {
 # Read ENV variables
 # -------------------------------------------------------
 args = getResolvedOptions(
-    sys.argv, ["JOB_NAME", "BRONZE_BUCKET", "SILVER_BUCKET", "FILES"])
+    sys.argv,
+    [
+        "JOB_NAME",
+        "BRONZE_BUCKET",
+        "SILVER_BUCKET",
+        "FILES",
+        "JDBC_URL",
+        "DB_USER",
+        "DB_PASSWORD",
+        "SOURCE_SCHEMA",
+        "TARGET_SCHEMA",
+    ],
+)
+
+
+JDBC_URL = args["JDBC_URL"]
+DB_USER = args["DB_USER"]
+DB_PASSWORD = args["DB_PASSWORD"]
+SOURCE_SCHEMA = args["SOURCE_SCHEMA"]
+TARGET_SCHEMA = args["TARGET_SCHEMA"]
+
 # e.g. lanhm-dev-datalake-raw-bucket-us-west-2-.../galaxy/
 BRONZE_BUCKET = args["BRONZE_BUCKET"]
 # e.g. lanhm-dev-datalake-stage-bucket-us-west-2-.../galaxy/
