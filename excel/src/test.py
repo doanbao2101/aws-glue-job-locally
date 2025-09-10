@@ -1,26 +1,37 @@
 import re
-from collections import defaultdict
 
-def detect_categories(sheet_names):
-    categories = defaultdict(list)
-
-    for s in sheet_names:
-        match = re.match(r"^([A-Za-z]+)?\s*(FY\d+)$", s.strip(), re.IGNORECASE)
-        if match:
-            prefix, fy = match.groups()
-            if prefix:
-                cat = prefix.upper()  
-            else:
-                cat = "FY"
-            categories[cat].append(s)
-        else:
-            categories["OTHERS"].append(s)
-
-    return dict(categories)
+SILVER_BUCKET = "lanhm-lake-silver"
 
 
-# Example usage
-sheet_names = ["Hart FY20"]
-categories = detect_categories(sheet_names)
-keys = list(categories.keys())
-print(keys)
+def to_snake_case(name: str) -> str:
+    """
+    Convert a string into snake_case format.
+
+    - Replace spaces & special characters with underscores.
+    - Collapse multiple underscores into one.
+    - Strip leading/trailing underscores.
+    - Lowercase the result.
+
+    Example:
+        "Hello World!!  Test" -> "hello_world_test"
+    """
+    # Replace non-alphanumeric characters with underscore
+    name = re.sub(r"[^0-9a-zA-Z]+", "_", name)
+    # Collapse multiple underscores
+    name = re.sub(r"_+", "_", name)
+    # Strip leading/trailing underscores & lowercase
+    return name.strip("_").lower()
+
+
+def build_code_checkpoint(output_path: str) -> str:
+    """
+    Build a code checkpoint in the format
+    """
+
+    raw = output_path.replace(
+        f"s3://{SILVER_BUCKET}/", "").replace("/", ".").replace("-", "_").strip('.')
+    return raw
+
+
+print(build_code_checkpoint(
+    "s3://lanhm-lake-silver/galaxy/corporate-members/members-list/"))

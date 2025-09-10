@@ -14,6 +14,7 @@ import pyspark.sql.functions as F
 from datetime import datetime
 import openpyxl
 from pyspark.sql import DataFrame
+import psycopg2
 
 # -------------------------------------------------------
 # Setup logging with emojis
@@ -63,7 +64,7 @@ FIELD_MAPPING = {
     "facilityname": "facility_name",
     "nodenumber": "node_number"
 }
-
+PIPELINE_STAGE = ["Ingestion", "Transformation", "Loading"]
 
 # -------------------------------------------------------
 # Read ENV variables
@@ -78,8 +79,7 @@ args = getResolvedOptions(
         "JDBC_URL",
         "DB_USER",
         "DB_PASSWORD",
-        "SOURCE_SCHEMA",
-        "TARGET_SCHEMA",
+        "DE_USER"
     ],
 )
 
@@ -87,8 +87,7 @@ args = getResolvedOptions(
 JDBC_URL = args["JDBC_URL"]
 DB_USER = args["DB_USER"]
 DB_PASSWORD = args["DB_PASSWORD"]
-SOURCE_SCHEMA = args["SOURCE_SCHEMA"]
-TARGET_SCHEMA = args["TARGET_SCHEMA"]
+DE_USER = args["DE_USER"]
 
 # e.g. lanhm-dev-datalake-raw-bucket-us-west-2-.../galaxy/
 BRONZE_BUCKET = args["BRONZE_BUCKET"]
@@ -118,14 +117,54 @@ job.init(args["JOB_NAME"], args)
 # -------------------------------------------------------
 
 
+def jdbc_update_data_checkpoint(group_name: str, code: str, user: str = "Bao Doan"):
+    clean_url = JDBC_URL.replace("jdbc:postgresql://", "")
+    host_port, dbname = clean_url.split("/")
+    host, port = host_port.split(":")
+    port = int(port)
+    conn = psycopg2.connect(
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=DB_USER,
+        password=DB_PASSWORD
+    )
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        INSERT INTO control.data_checkpoints (
+            group_name, name, code, data_upto_ts, note, created_at, updated_at, created_by, updated_by
+        )
+        VALUES ('{group_name}', NULL, '{code}', now(),
+                '', now(), now(), '{user}', '{user}')
+        ON CONFLICT (group_name,code)
+        DO UPDATE
+        SET
+            data_upto_ts = EXCLUDED.data_upto_ts,
+            updated_at   = EXCLUDED.updated_at,
+            updated_by   = EXCLUDED.updated_by;
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info(f"✅ Updated Data checkpoint!")
+
+
 def write_parquet(df, output_path, record_count=None, mode="overwrite"):
     """
     Write a Spark DataFrame to Parquet with logging.
     """
     df = optimize_coalesce(df, record_count, target_file_size_mb=128)
     logger.info(f"💾 Writing {record_count} records → {output_path}")
-    df.write.mode(mode).parquet(output_path)
+    # df.write.mode(mode).parquet(output_path)
     logger.info(f"✅ Write completed!")
+
+    # Update checkpoint after transformation
+    jdbc_update_data_checkpoint(
+        group_name=PIPELINE_STAGE[1],
+        code=output_path,
+        user=DE_USER)
 
 
 def get_sheet_names_from_s3(bucket, key):
@@ -194,7 +233,7 @@ def read_sheet_to_sdf_spark(s3_path: str, sheet: str, extra_cols=None) -> DataFr
 
 def extract_fy(text: str) -> str:
     """
-    Extract the fiscal year code (e.g., FY17, FY18, FY20) 
+    Extract the fiscal year code (e.g., FY17, FY18, FY20)
     from a given string.
     """
     match = re.search(r'FY\d{2}', text, re.IGNORECASE)
@@ -305,6 +344,13 @@ def optimize_coalesce(df, record_count, target_file_size_mb=128, max_partitions=
         return df.coalesce(10)
 
 
+def build_code_checkpoint(output_path: str) -> str:
+    """
+    Build a code checkpoint in the format
+    """
+    raw = output_path.replace(
+        f"s3://{SILVER_BUCKET}/", "").replace("/", ".").replace("-", "_").strip('.')
+    return raw
 # -------------------------------------------------------
 # Transformation functions for excel files
 # -------------------------------------------------------
@@ -332,7 +378,7 @@ def transform_all_fiscal_sheets_to_single_parquet(file_name, excel_bytes, sheet_
                     )
             else:
                 sdf = read_sheet_to_sdf(excel_bytes, sheet, {
-                                        "fiscal_year": sheet})
+                    "fiscal_year": sheet})
 
             if sdf is None:
                 continue
@@ -370,7 +416,7 @@ def transform_fiscal_sheets_by_category_to_parquet(file_name, excel_bytes, sheet
         for sheet in sheets:
             try:
                 sdf = read_sheet_to_sdf(excel_bytes, sheet, {
-                                        "fiscal_year": extract_fy(sheet)})
+                    "fiscal_year": extract_fy(sheet)})
                 record_count = sdf.count()
                 logger.info(
                     f"🔎 Reading fiscal sheet: {sheet} → {record_count} records")
@@ -389,7 +435,7 @@ def transform_fiscal_sheets_by_category_to_parquet(file_name, excel_bytes, sheet
 
 
 def transform_each_sheet_to_parquet(file_name, excel_bytes, sheet_names):
-    """ 
+    """
         Default transformation: each sheet becomes one Parquet output.
     """
     for sheet in sheet_names:
@@ -404,7 +450,17 @@ def transform_each_sheet_to_parquet(file_name, excel_bytes, sheet_names):
                 f"🔎 Reading fiscal sheet: {sheet} → {record_count} records")
             sheet_kebab = to_kebab_case(sheet)
             output_path = f"s3://{SILVER_BUCKET}/galaxy/{file_name}/{sheet_kebab}/"
+
+            # Write to Parquet to Silver bucket
             write_parquet(sdf, output_path, record_count)
+
+            # Load data to Data Warehouse (Postgres)
+            load_parquet_to_postgres(
+                df=sdf,
+                file_key=f"{file_name}_{sheet_kebab}",
+                target_schema="wh",
+                s3_path=output_path,
+                mode="overwrite")
 
         except Exception as e:
             logger.error(
@@ -417,12 +473,61 @@ def transform_each_sheet_to_parquet(file_name, excel_bytes, sheet_names):
 
 
 def load_parquet_to_postgres(
+    df: DataFrame,
+    file_key: str,
+    target_schema: str,
+    s3_path: str = None,
+    mode: str = "overwrite"
+):
+    """
+    Read parquet data from Silver S3 bucket and write to RDS Postgres.
+
+    Args:
+        spark: SparkSession
+        silver_bucket (str): S3 bucket Silver layer
+        file_name (str): folder name inside galaxy (kebab-case)
+        jdbc_url (str): JDBC URL of target Postgres
+        target_schema (str): Postgres schema name
+        table_name (str): Postgres table name
+        db_user (str): DB username
+        db_password (str): DB password
+        mode (str): "overwrite" or "append"
+    """
+    try:
+        table_name = to_snake_case(file_key)
+        record_count = df.count()
+        logger.info(f"🔢 Loaded {record_count} records from parquet")
+
+        # df.write.format("jdbc") \
+        #     .mode(mode) \
+        #     .option("url", JDBC_URL) \
+        #     .option("dbtable", f'"{target_schema}"."galaxy_{table_name}"') \
+        #     .option("user", DB_USER) \
+        #     .option("password", DB_PASSWORD) \
+        #     .option("driver", "org.postgresql.Driver") \
+        #     .option("batchsize", "5000") \
+        #     .option("numPartitions", "8") \
+        #     .save()
+
+        jdbc_update_data_checkpoint(
+            group_name=PIPELINE_STAGE[2],
+            code=s3_path,
+            user=DE_USER)
+
+        logger.info(
+            f"✅ Successfully written {record_count} records to {target_schema}.{table_name}")
+
+    except Exception as e:
+        logger.error(
+            f"❌ Error writing parquet {table_name} to Postgres: {e}", exc_info=True)
+
+
+def read_and_load_parquet_to_postgres(
     spark,
     silver_bucket: str,
-    file_name: str,
+    file_key: str,
     jdbc_url: str,
     target_schema: str,
-    table_name: str,
     db_user: str,
     db_password: str,
     mode: str = "overwrite"
@@ -442,21 +547,22 @@ def load_parquet_to_postgres(
         mode (str): "overwrite" or "append"
     """
     try:
-        s3_path = f"s3://{silver_bucket}/galaxy/{file_name}/"
+        s3_path = f"s3://{silver_bucket}/galaxy/{file_key}/"
         logger.info(f"📥 Loading parquet from {s3_path}")
         df: DataFrame = spark.read.parquet(s3_path)
-
+        table_name = to_snake_case(file_key)
         record_count = df.count()
         logger.info(f"🔢 Loaded {record_count} records from parquet")
 
         df.write.format("jdbc") \
             .mode(mode) \
             .option("url", jdbc_url) \
-            .option("dbtable", f'"{target_schema}"."{table_name}"') \
+            .option("dbtable", f'"{target_schema}"."galaxy_{table_name}"') \
             .option("user", db_user) \
             .option("password", db_password) \
             .option("driver", "org.postgresql.Driver") \
             .option("batchsize", "5000") \
+            .option("numPartitions", "8") \
             .save()
 
         logger.info(
@@ -464,7 +570,7 @@ def load_parquet_to_postgres(
 
     except Exception as e:
         logger.error(
-            f"❌ Error writing parquet {file_name} to Postgres: {e}", exc_info=True)
+            f"❌ Error writing parquet {table_name} to Postgres: {e}", exc_info=True)
 
 # -------------------------------------------------------
 # Main processing
@@ -510,3 +616,18 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # tables = file_names = [f.replace(".xlsx", "") for f in FILES.split(",")]
+    # for t in tables:
+    #     continue
+    # read_and_load_parquet_to_postgres(
+    #     spark,
+    #     SILVER_BUCKET,
+    #     t,
+    #     JDBC_URL,
+    #     "wh",
+    #     DB_USER,
+    #     DB_PASSWORD,
+    #     mode="overwrite"
+    # )
+    # jdbc_update_data_checkpoint(
+    #     PIPELINE_STAGE[2], ""f"galaxy/{to_kebab_case(t)}/", DE_USER)

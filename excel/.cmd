@@ -26,10 +26,15 @@ sudo docker run -it --rm \
   -e AWS_PROFILE="$PROFILE_NAME" \
   glue-libs-with-openpyxl-postgres \
   spark-submit \
+    --packages org.postgresql:postgresql:42.7.4 \
     /home/hadoop/workspace/transformation.py \
     --JOB_NAME my-local-job \
     --BRONZE_BUCKET "lanhm-dev-datalake-raw-bucket-us-west-2-032397978411/galaxy/" \
-    --SILVER_BUCKET "lanhm-dev-datalake-stage-bucket-us-west-2-032397978411/" \
-    --FILES "final-attendance.xlsx"
-    
+    --SILVER_BUCKET "lanhm-dev-datalake-stage-bucket-us-west-2-032397978411" \
+    --JDBC_URL "jdbc:postgresql://host.docker.internal:5433/lanhm_db" \
+    --DB_USER "superadmin" \
+    --DB_PASSWORD 'pv4I4MhdpB]eKF$csR0|wdV!I9RG' \
+    --DE_USER "Bao Doan" \
+    --FILES "corporate-members.xlsx"
 
+  

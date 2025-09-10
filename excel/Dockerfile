@@ -1,7 +1,7 @@
 FROM public.ecr.aws/glue/aws-glue-libs:5
 
 # Install Python packages
-RUN pip install --no-cache-dir openpyxl
+RUN pip install --no-cache-dir openpyxl psycopg2-binary
 
 # Install PostgreSQL JDBC driver
 RUN mkdir -p /home/hadoop/jars && \
