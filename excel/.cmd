@@ -35,6 +35,8 @@ sudo docker run -it --rm \
     --DB_USER "superadmin" \
     --DB_PASSWORD 'pv4I4MhdpB]eKF$csR0|wdV!I9RG' \
     --DE_USER "Bao Doan" \
-    --FILES "corporate-members.xlsx"
+    --FILES "corporate-members.xlsx,final-membership.xlsx,final-attendance.xlsx, final-fiscal-sales.xlsx"
 
-  
+  @REM corporate-members.xlsx, school-attendance.xlsx
+  @REM final-attendance.xlsx, final-fiscal-sales.xlsx
+  @REM final-membership.xlsx

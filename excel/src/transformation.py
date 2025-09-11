@@ -15,6 +15,7 @@ from datetime import datetime
 import openpyxl
 from pyspark.sql import DataFrame
 import psycopg2
+import numpy as np
 
 # -------------------------------------------------------
 # Setup logging with emojis
@@ -152,50 +153,10 @@ def jdbc_update_data_checkpoint(group_name: str, code: str, user: str = "Bao Doa
     logger.info(f"📌 Updated Checkpoint: {code}")
 
 
-def write_parquet(df: DataFrame, output_path: str, record_count: int, code: str, mode="overwrite"):
-    """
-    Write a Spark DataFrame to Parquet with logging.
-    """
-    df = optimize_coalesce(df, record_count, target_file_size_mb=128)
-    logger.info(f"️️🔁 Writing {record_count} records → {output_path}")
-    # df.write.mode(mode).parquet(output_path)
-    logger.info(
-        f"🥈 Successfully written: {record_count} records → {output_path}")
-
-    # Update checkpoint after transformation
-    jdbc_update_data_checkpoint(
-        group_name=PIPELINE_STAGE[1],
-        code=code,
-        user=DE_USER)
-
-
 def get_sheet_names_from_s3(bucket, key):
     obj = S3.get_object(Bucket=bucket, Key=key)
     wb = openpyxl.load_workbook(BytesIO(obj["Body"].read()), read_only=True)
     return wb.sheetnames
-
-
-def transform_excel_to_sdf(excel_bytes, sheet, extra_cols=None):
-    """
-    Read an Excel sheet into Spark DataFrame with standardized columns.
-
-    - Apply FIELD_MAPPING with fallback to snake_case.
-    - Add any extra columns provided in `extra_cols`.
-    """
-    try:
-        pdf = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet)
-        pdf.columns = [FIELD_MAPPING.get(c, to_snake_case(c))
-                       for c in pdf.columns]
-
-        if extra_cols:
-            for col, val in extra_cols.items():
-                pdf[col] = val
-        target_partitions = max(10, len(pdf) // 50000)
-        return spark.createDataFrame(pdf).repartition(target_partitions)
-
-    except Exception as e:
-        logger.error(f"❌ Error reading sheet '{sheet}': {e}", exc_info=True)
-        return None   # return None to indicate failure
 
 
 def read_sheet_to_sdf_spark(s3_path: str, sheet: str, extra_cols=None) -> DataFrame:
@@ -360,65 +321,44 @@ def build_code_checkpoint(data_source: str, key: str, sub_key: str) -> str:
 # -------------------------------------------------------
 # Transformation functions for excel files
 # -------------------------------------------------------
-def write_silver_and_load_dw(
-    combined_df,
-    file_name: str,
-    category: str | None,
-    silver_bucket: str,
-    target_schema: str = "dw",
-    mode: str = "overwrite"
-) -> None:
+
+def transform_excel_to_sdf(excel_bytes, sheet, extra_cols=None):
     """
-    Process a Spark DataFrame and load it into both S3 (Silver layer) and Postgres (Data Warehouse).
-
-    Steps:
-    1. Count records in the DataFrame.
-    2. Build output path in Silver S3 bucket.
-    3. Generate checkpoint code for tracking.
-    4. Write DataFrame as Parquet to S3.
-    5. Load DataFrame into Postgres target schema.
-
-    Args:
-        combined_df: Spark DataFrame to be processed.
-        file_name (str): The name of the source file.
-        category (str): Data category / sub-key.
-        silver_bucket (str): Target Silver S3 bucket name.
-        target_schema (str, optional): Postgres schema to load into. Default = "dw".
-        mode (str, optional): Load mode for Postgres. Default = "overwrite".
-
-    Returns:
-        None
+    Read an Excel sheet into Spark DataFrame with standardized columns.
+    - Apply FIELD_MAPPING with fallback to snake_case.
+    - Add any extra columns provided in `extra_cols`.
     """
-    # Step 1: Count records
-    record_count = combined_df.count()
+    try:
+        pdf = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet)
+        # Standardize column names:
+        # pdf.columns = [FIELD_MAPPING.get(c, to_snake_case(c)) ]
 
-    # Step 2: Write S3 output path
-    base_path = f"s3://{silver_bucket}/galaxy/{file_name}"
-    output_path = f"{base_path}/{category}/" if category else f"{base_path}/"
+        new_columns = []
+        for old_col in pdf.columns:
+            # Standardize column name
+            new_col = FIELD_MAPPING.get(old_col, to_snake_case(old_col))
+            new_columns.append(new_col)
 
-    # Step 3: Generate checkpoint code
-    checkpoint_code = build_code_checkpoint(
-        data_source="galaxy",
-        key=file_name,
-        sub_key=category
-    )
+            # If column is datetime, convert it
+            if np.issubdtype(pdf[old_col].dtype, np.datetime64):
+                pdf[old_col] = pd.to_datetime(
+                    pdf[old_col]).dt.strftime("%Y-%m-%d")
 
-    # Step 4: Write DataFrame to Parquet (Silver layer)
-    write_parquet(
-        df=combined_df,
-        output_path=output_path,
-        record_count=record_count,
-        code=checkpoint_code
-    )
+        pdf.columns = new_columns
 
-    # Step 5: Load DataFrame into Postgres (Data Warehouse)
-    load_parquet_to_postgres(
-        df=combined_df,
-        file_key=f"{file_name}_{category}",
-        target_schema=target_schema,
-        code=checkpoint_code,
-        mode=mode
-    )
+        # Add extra columns if any
+        if extra_cols:
+            for col, val in extra_cols.items():
+                pdf[col] = val
+
+        # Convert to Spark DataFrame
+        target_partitions = max(10, len(pdf) // 50000)
+
+        return spark.createDataFrame(pdf).repartition(target_partitions)
+
+    except Exception as e:
+        logger.error(f"❌ Error reading sheet '{sheet}': {e}", exc_info=True)
+        return None   # return None to indicate failure
 
 
 def transform_all_fiscal_sheets_to_single_parquet(file_name, excel_bytes, sheet_names):
@@ -475,7 +415,7 @@ def transform_all_fiscal_sheets_to_single_parquet(file_name, excel_bytes, sheet_
         #                                         sub_key=None)
 
         # # Write to Parquet to Silver bucket
-        # write_parquet(df=combined_df,
+        # write_parquet_to_s3(df=combined_df,
         #               output_path=output_path,
         #               record_count=record_count,
         #               code=checkpoint_code)
@@ -537,7 +477,7 @@ def transform_fiscal_sheets_by_category_to_parquet(file_name, excel_bytes, sheet
             #                                         sub_key=category)
 
             # # Write to Parquet to Silver bucket
-            # write_parquet(df=combined_df,
+            # write_parquet_to_s3(df=combined_df,
             #               output_path=output_path,
             #               record_count=record_count,
             #               code=checkpoint_code)
@@ -582,7 +522,7 @@ def transform_each_sheet_to_parquet(file_name, excel_bytes, sheet_names):
             #                                         sub_key=sheet)
 
             # # Write to Parquet to Silver bucket
-            # write_parquet(df=sdf, output_path=output_path,
+            # write_parquet_to_s3(df=sdf, output_path=output_path,
             #               record_count=record_count, code=checkpoint_code)
 
             # # Load data to Data Warehouse (Postgres)
@@ -601,6 +541,84 @@ def transform_each_sheet_to_parquet(file_name, excel_bytes, sheet_names):
 # -------------------------------------------------------
 # Loading data to Data Warehouses (Postgres)
 # -------------------------------------------------------
+
+
+def write_silver_and_load_dw(
+    combined_df,
+    file_name: str,
+    category: str | None,
+    silver_bucket: str,
+    target_schema: str = "dw",
+    mode: str = "overwrite"
+) -> None:
+    """
+    Process a Spark DataFrame and load it into both S3 (Silver layer) and Postgres (Data Warehouse).
+
+    Steps:
+    1. Count records in the DataFrame.
+    2. Build output path in Silver S3 bucket.
+    3. Generate checkpoint code for tracking.
+    4. Write DataFrame as Parquet to S3.
+    5. Load DataFrame into Postgres target schema.
+
+    Args:
+        combined_df: Spark DataFrame to be processed.
+        file_name (str): The name of the source file.
+        category (str): Data category / sub-key.
+        silver_bucket (str): Target Silver S3 bucket name.
+        target_schema (str, optional): Postgres schema to load into. Default = "dw".
+        mode (str, optional): Load mode for Postgres. Default = "overwrite".
+
+    Returns:
+        None
+    """
+    # Step 1: Count records
+    record_count = combined_df.count()
+
+    # Step 2: Write S3 output path
+    base_path = f"s3://{silver_bucket}/galaxy/{file_name}"
+    output_path = f"{base_path}/{category}/" if category else f"{base_path}/"
+
+    # Step 3: Generate checkpoint code
+    checkpoint_code = build_code_checkpoint(
+        data_source="galaxy",
+        key=file_name,
+        sub_key=category
+    )
+
+    # Step 4: Write DataFrame to Parquet (Silver layer)
+    write_parquet_to_s3(
+        df=combined_df,
+        output_path=output_path,
+        record_count=record_count,
+        code=checkpoint_code
+    )
+
+    # Step 5: Load DataFrame into Postgres (Data Warehouse)
+    load_parquet_to_postgres(
+        df=combined_df,
+        file_key=f"{file_name}_{category}" if category else file_name,
+        target_schema=target_schema,
+        code=checkpoint_code,
+        mode=mode
+    )
+
+
+def write_parquet_to_s3(df: DataFrame, output_path: str, record_count: int, code: str, mode="overwrite"):
+    """
+    Write a Spark DataFrame to Parquet with logging.
+    """
+    df = optimize_coalesce(df, record_count, target_file_size_mb=128)
+    logger.info(f"️️🔁 Writing {record_count} records → {output_path}")
+    df.write.mode(mode).parquet(output_path)
+    logger.info(
+        f"🥈 Successfully written: {record_count} records → {output_path}")
+
+    # Update checkpoint after transformation
+    jdbc_update_data_checkpoint(
+        group_name=PIPELINE_STAGE[1],
+        code=code,
+        user=DE_USER)
 
 
 def load_parquet_to_postgres(
@@ -628,28 +646,25 @@ def load_parquet_to_postgres(
         table_name = to_snake_case(file_key)
         record_count = df.count()
         logger.info(
-            f"️🔁 Loading {record_count} records → galaxy_{table_name}...")
+            f"🔁 Loading {record_count} records → galaxy_{table_name}...")
 
-        # df.write.format("jdbc") \
-        #     .mode(mode) \
-        #     .option("url", JDBC_URL) \
-        #     .option("dbtable", f'"{target_schema}"."galaxy_{table_name}"') \
-        #     .option("user", DB_USER) \
-        #     .option("password", DB_PASSWORD) \
-        #     .option("driver", "org.postgresql.Driver") \
-        #     .option("batchsize", "5000") \
-        #     .option("numPartitions", "8") \
-        #     .save()
-        # logger.info(
-        #     f"✅ Completed loading: {record_count} records → galaxy_{table_name}")
+        df.write.format("jdbc") \
+            .mode(mode) \
+            .option("url", JDBC_URL) \
+            .option("dbtable", f'"{target_schema}"."galaxy_{table_name}"') \
+            .option("user", DB_USER) \
+            .option("password", DB_PASSWORD) \
+            .option("driver", "org.postgresql.Driver") \
+            .option("batchsize", "5000") \
+            .option("numPartitions", "8") \
+            .save()
+        logger.info(
+            f"🥇 Successfully loaded {record_count} records to {target_schema}.{table_name}")
 
         jdbc_update_data_checkpoint(
             group_name=PIPELINE_STAGE[2],
             code=code,
             user=DE_USER)
-
-        logger.info(
-            f"✅  {record_count} records to {target_schema}.{table_name}")
 
     except Exception as e:
         logger.error(
@@ -768,9 +783,9 @@ if __name__ == "__main__":
 
 
 ################# NEED TO DO ####################
+# Loading data to DW........
 
 # Predefine: data config file
 # Update script: for this data control structure
-# Loading data to DW
 
 ##################################################
