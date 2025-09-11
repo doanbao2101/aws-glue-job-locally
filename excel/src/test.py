@@ -1,37 +1,25 @@
-import re
+def test_output_path():
+    silver_bucket = "my-bucket"
+    file_name = "orders"
 
-SILVER_BUCKET = "lanhm-lake-silver"
+    # Case 1: category is None
+    category = None
+    output_path = f"s3://{silver_bucket}/galaxy/{file_name}/{category or ''}/"
+    assert output_path == "s3://my-bucket/galaxy/orders/"
 
+    # Case 2: category is empty string
+    category = ""
+    output_path = f"s3://{silver_bucket}/galaxy/{file_name}/{category or ''}/"
+    assert output_path == "s3://my-bucket/galaxy/orders/"
 
-def to_snake_case(name: str) -> str:
-    """
-    Convert a string into snake_case format.
+    # Case 3: category is normal string
+    category = "transactions"
+    output_path = f"s3://{silver_bucket}/galaxy/{file_name}/{category or ''}/"
+    assert output_path == "s3://my-bucket/galaxy/orders/transactions/"
 
-    - Replace spaces & special characters with underscores.
-    - Collapse multiple underscores into one.
-    - Strip leading/trailing underscores.
-    - Lowercase the result.
+    # Case 4: category with spaces (should be preserved)
+    category = "2025 reports"
+    output_path = f"s3://{silver_bucket}/galaxy/{file_name}/{category or ''}/"
+    assert output_path == "s3://my-bucket/galaxy/orders/2025 reports/"
 
-    Example:
-        "Hello World!!  Test" -> "hello_world_test"
-    """
-    # Replace non-alphanumeric characters with underscore
-    name = re.sub(r"[^0-9a-zA-Z]+", "_", name)
-    # Collapse multiple underscores
-    name = re.sub(r"_+", "_", name)
-    # Strip leading/trailing underscores & lowercase
-    return name.strip("_").lower()
-
-
-def build_code_checkpoint(output_path: str) -> str:
-    """
-    Build a code checkpoint in the format
-    """
-
-    raw = output_path.replace(
-        f"s3://{SILVER_BUCKET}/", "").replace("/", ".").replace("-", "_").strip('.')
-    return raw
-
-
-print(build_code_checkpoint(
-    "s3://lanhm-lake-silver/galaxy/corporate-members/members-list/"))
+test_output_path()
