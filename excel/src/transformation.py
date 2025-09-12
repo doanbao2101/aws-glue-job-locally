@@ -406,29 +406,6 @@ def transform_all_fiscal_sheets_to_single_parquet(file_name, excel_bytes, sheet_
             mode="overwrite"
         )
 
-        # record_count = combined_df.count()
-        # output_path = f"s3://{SILVER_BUCKET}/galaxy/{file_name}/"
-
-        # # Build checkpoint code
-        # checkpoint_code = build_code_checkpoint(data_source='galaxy',
-        #                                         key=file_name,
-        #                                         sub_key=None)
-
-        # # Write to Parquet to Silver bucket
-        # write_parquet_to_s3(df=combined_df,
-        #               output_path=output_path,
-        #               record_count=record_count,
-        #               code=checkpoint_code)
-
-        # # Load data to Data Warehouse (Postgres)
-        # load_parquet_to_postgres(
-        #     df=combined_df,
-        #     file_key=f"{file_name}",
-        #     target_schema="dw",
-        #     code=checkpoint_code,
-        #     mode="overwrite")
-
-
 def transform_fiscal_sheets_by_category_to_parquet(file_name, excel_bytes, sheet_names):
     """
         File with multiple fiscal year sheets (e.g., FY17, FY18, FY19).
@@ -468,28 +445,6 @@ def transform_fiscal_sheets_by_category_to_parquet(file_name, excel_bytes, sheet
                 mode="overwrite"
             )
 
-            # record_count = combined_df.count()
-            # output_path = f"s3://{SILVER_BUCKET}/galaxy/{file_name}/{category}/"
-
-            # # Build checkpoint code
-            # checkpoint_code = build_code_checkpoint(data_source='galaxy',
-            #                                         key=file_name,
-            #                                         sub_key=category)
-
-            # # Write to Parquet to Silver bucket
-            # write_parquet_to_s3(df=combined_df,
-            #               output_path=output_path,
-            #               record_count=record_count,
-            #               code=checkpoint_code)
-
-            # # Load data to Data Warehouse (Postgres)
-            # load_parquet_to_postgres(
-            #     df=combined_df,
-            #     file_key=f"{file_name}_{category}",
-            #     target_schema="dw",
-            #     code=checkpoint_code,
-            #     mode="overwrite")
-
 
 def transform_each_sheet_to_parquet(file_name, excel_bytes, sheet_names):
     """
@@ -512,26 +467,6 @@ def transform_each_sheet_to_parquet(file_name, excel_bytes, sheet_names):
                 target_schema="dw",
                 mode="overwrite"
             )
-
-            # sheet_kebab = to_kebab_case(sheet)
-
-            # output_path = f"s3://{SILVER_BUCKET}/galaxy/{file_name}/{sheet_kebab}/"
-            # # Build checkpoint code
-            # checkpoint_code = build_code_checkpoint(data_source='galaxy',
-            #                                         key=file_name,
-            #                                         sub_key=sheet)
-
-            # # Write to Parquet to Silver bucket
-            # write_parquet_to_s3(df=sdf, output_path=output_path,
-            #               record_count=record_count, code=checkpoint_code)
-
-            # # Load data to Data Warehouse (Postgres)
-            # load_parquet_to_postgres(
-            #     df=sdf,
-            #     file_key=f"{file_name}_{sheet_kebab}",
-            #     target_schema="dw",
-            #     code=checkpoint_code,
-            #     mode="overwrite")
 
         except Exception as e:
             logger.error(
@@ -783,9 +718,9 @@ if __name__ == "__main__":
 
 
 ################# NEED TO DO ####################
-# Loading data to DW........
 
 # Predefine: data config file
 # Update script: for this data control structure
+# Update workflow
 
 ##################################################
